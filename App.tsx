@@ -8,7 +8,7 @@ import { TrashIcon } from './components/icons/TrashIcon';
 import { ArrowPathIcon } from './components/icons/ArrowPathIcon';
 import { CursorArrowRaysIcon } from './components/icons/CursorArrowRaysIcon';
 import { PlayIcon } from './components/icons/PlayIcon';
-import { GoogleGenAI } from '@google/genai';
+import { GoogleGenAI, Type } from '@google/genai';
 
 const App: React.FC = () => {
   const [step, setStep] = useState<number>(1);
@@ -30,6 +30,9 @@ const App: React.FC = () => {
   const [container, setContainer] = useState<Omit<Extractor, 'id' | 'name'>>({ tag: '', attrs: '' });
   const [containerTestResult, setContainerTestResult] = useState<{ count: number; preview: string; error?: boolean } | null>(null);
   const [isContainerSet, setIsContainerSet] = useState<boolean>(false);
+  
+  const [extractionMethod, setExtractionMethod] = useState<'auto' | 'manual' | null>(null);
+  const [autoFieldDetectLoading, setAutoFieldDetectLoading] = useState<boolean>(false);
 
   const [extractors, setExtractors] = useState<Extractor[]>([
     { id: Date.now(), name: 'item_1', tag: '', attrs: '' },
@@ -128,6 +131,7 @@ const App: React.FC = () => {
     setContainer(prev => ({ ...prev, [field]: value }));
     setContainerTestResult(null);
     setIsContainerSet(false); // Force re-test on any change
+    setExtractionMethod(null); // Reset choice when container changes
   }, []);
   
   const handleModeChange = (mode: ScrapingMode) => {
@@ -136,6 +140,7 @@ const App: React.FC = () => {
       setContainer({ tag: '', attrs: '' });
       setContainerTestResult(null);
       setIsContainerSet(false);
+      setExtractionMethod(null);
       setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
       setTestResults({});
       setError('');
@@ -146,6 +151,10 @@ const App: React.FC = () => {
     if (scrapingMode === 'structured') {
         if (!isContainerSet || !container.tag) {
             setError('Please define and successfully test a container before generating the code.');
+            return;
+        }
+        if (extractors.length === 0 && extractionMethod !== 'auto') {
+            setError('Please add at least one field to extract.');
             return;
         }
         const invalidExtractor = extractors.find(e => !e.name.trim() || !e.tag.trim());
@@ -198,6 +207,7 @@ const App: React.FC = () => {
     setTestResults({});
     setContainerTestResult(null);
     setIsContainerSet(false);
+    setExtractionMethod(null);
     setOutputFormat('csv');
   };
   
@@ -208,6 +218,7 @@ const App: React.FC = () => {
       if (scrapingMode === 'structured') {
         setIsContainerSet(false);
         setContainerTestResult(null);
+        setExtractionMethod(null);
       }
       if (step === 4 && startMethod === 'file') {
         setStep(1);
@@ -267,6 +278,9 @@ const App: React.FC = () => {
               const preview = `Found ${count} repeating container elements.`;
               setContainerTestResult({ count, preview, error: !isSuccess });
               setIsContainerSet(isSuccess);
+              if (!isSuccess) {
+                setExtractionMethod(null);
+              }
           } else { // extractor
              if (scrapingMode === 'structured' && container.tag) {
                    const containerSelector = convertToSelector(container.tag, container.attrs);
@@ -291,6 +305,7 @@ const App: React.FC = () => {
            if(type === 'container') {
               setContainerTestResult(result);
               setIsContainerSet(false);
+              setExtractionMethod(null);
           }
           else setTestResults(prev => ({ ...prev, [id]: result }));
       }
@@ -349,6 +364,78 @@ const App: React.FC = () => {
       setError('An error occurred during AI pattern detection.');
     } finally {
       setAutoDetectLoading(false);
+    }
+  };
+
+  const handleAutoFieldDetect = async () => {
+    setError('');
+    const iframeDoc = iframeRef.current?.contentDocument;
+    const containerSelector = convertToSelector(container.tag, container.attrs);
+
+    if (!iframeDoc || !containerSelector) {
+        setError('Could not find HTML preview or container selector.');
+        return;
+    }
+
+    const firstContainer = iframeDoc.querySelector(containerSelector);
+    if (!firstContainer) {
+        setError('Could not find a container element in the preview to analyze.');
+        return;
+    }
+
+    setAutoFieldDetectLoading(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const prompt = `Given this HTML snippet of a single item in a list: \`\`\`html\n${firstContainer.outerHTML}\n\`\`\`
+      Identify the key pieces of information a user would want to extract. For each piece of information, provide:
+      1. A short, descriptive variable name in snake_case (e.g., product_title).
+      2. The HTML tag of the element (e.g., h2).
+      3. A minimal but effective set of attributes to uniquely identify the element within the snippet (e.g., class=title).
+      Return ONLY a JSON array of objects, where each object has "name", "tag", and "attrs" keys.
+      Example: [{ "name": "product_title", "tag": "h2", "attrs": "class=title" }, { "name": "price", "tag": "span", "attrs": "class=price" }]`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        name: { type: Type.STRING },
+                        tag: { type: Type.STRING },
+                        attrs: { type: Type.STRING },
+                    },
+                    required: ['name', 'tag', 'attrs']
+                }
+            }
+        }
+      });
+      
+      const jsonStr = response.text.trim();
+      const suggestedFields = JSON.parse(jsonStr);
+
+      if (Array.isArray(suggestedFields) && suggestedFields.length > 0) {
+        const newExtractors = suggestedFields.map(field => ({
+          id: Date.now() + Math.random(),
+          name: field.name || 'unnamed_field',
+          tag: field.tag || '',
+          attrs: field.attrs || '',
+        }));
+        setExtractors(newExtractors);
+      } else {
+        setError('AI could not find any fields to extract. Please add them manually.');
+        setExtractors([]); // Clear any existing
+      }
+      setExtractionMethod('manual'); // Show the populated list for editing
+
+    } catch (e) {
+      console.error('Error auto-detecting fields with AI:', e);
+      setError('An error occurred during AI field detection. Please try adding fields manually.');
+    } finally {
+      setAutoFieldDetectLoading(false);
     }
   };
 
@@ -630,12 +717,33 @@ const App: React.FC = () => {
                 <>
                   <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Container</h3><p className="text-xs text-gray-500 mb-2">Find the repeating element that holds all the info for one item (e.g., a product card).</p><div className="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-2"><div className="flex items-center gap-2"><input type="text" value={container.tag} onChange={(e) => handleContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(selectingFor === 'container' ? null : 'container')} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === 'container' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select container element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('container', 0, container.tag, container.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test container"><PlayIcon /></button></div><textarea value={container.attrs} onChange={(e) => handleContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=quote)" rows={1} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
                   {containerTestResult && (<div className={`p-2 text-xs rounded border ${containerTestResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}><p className="font-semibold">{containerTestResult.preview}</p></div>)}</div></div>
-                  {isContainerSet && (
-                  <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Fields to Extract</h3><p className="text-xs text-gray-500 mb-2">Define the data you want from inside each container.</p>
-                    <div className="space-y-4">{extractors.map((extractor, index) => {const testResult = testResults[extractor.id];return (<div key={extractor.id} className="p-4 bg-gray-50 border border-gray-200 rounded-lg"><div className="flex justify-between items-center mb-2"><label className="block text-sm font-medium text-gray-700">Field #{index + 1}</label><button onClick={() => handleRemoveExtractor(extractor.id)} disabled={extractors.length <= 1} className="text-gray-400 hover:text-red-600 disabled:text-gray-300 disabled:cursor-not-allowed transition-colors" aria-label="Remove extractor"><TrashIcon /></button></div><div className="grid grid-cols-1 gap-4"><input type="text" value={extractor.name} onChange={(e) => handleExtractorChange(extractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name (e.g., quote_text)" className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" /><div className="flex items-center gap-2"><input type="text" value={extractor.tag} onChange={(e) => handleExtractorChange(extractor.id, 'tag', e.target.value)} placeholder="HTML Tag (e.g., span)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(extractor.id === selectingFor ? null : extractor.id)} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === extractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select element from preview"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', extractor.id, extractor.tag, extractor.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test this field"><PlayIcon /></button></div><textarea value={extractor.attrs} onChange={(e) => handleExtractorChange(extractor.id, 'attrs', e.target.value)} placeholder="Attributes (e.g., class=text)" rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
-                    {testResult && (<div className={`mt-2 p-2 text-xs rounded border ${testResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}><p className="font-semibold">{testResult.preview}</p></div>)}</div></div>);})}</div>
-                    <button onClick={handleAddExtractor} className="mt-4 flex items-center justify-center w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors"><PlusIcon />Add Field</button>
-                  </div>
+                  
+                  {isContainerSet && extractionMethod === null && (
+                    <div className="mt-4 p-4 border-2 border-dashed border-indigo-200 bg-indigo-50 rounded-lg">
+                        <h3 className="text-base font-semibold text-gray-800">Define Fields to Extract</h3>
+                        <p className="text-xs text-gray-500 mb-3">Now, define the data you want from inside each container.</p>
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <button onClick={handleAutoFieldDetect} disabled={autoFieldDetectLoading} className="w-full px-3 py-2 bg-indigo-100 text-indigo-700 font-semibold rounded-md hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200 disabled:text-gray-500 disabled:cursor-wait flex items-center justify-center">
+                               {autoFieldDetectLoading ? (
+                                <>
+                                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-indigo-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                  Detecting...
+                                </>
+                              ) : "✨ Auto-detect Fields"}
+                            </button>
+                            <button onClick={() => setExtractionMethod('manual')} className="w-full px-3 py-2 bg-white text-gray-700 font-semibold rounded-md border border-gray-300 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
+                                Add Fields Manually
+                            </button>
+                        </div>
+                    </div>
+                  )}
+
+                  {isContainerSet && extractionMethod === 'manual' && (
+                    <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Fields to Extract</h3><p className="text-xs text-gray-500 mb-2">Define the data you want from inside each container.</p>
+                      <div className="space-y-4">{extractors.map((extractor, index) => {const testResult = testResults[extractor.id];return (<div key={extractor.id} className="p-4 bg-gray-50 border border-gray-200 rounded-lg"><div className="flex justify-between items-center mb-2"><label className="block text-sm font-medium text-gray-700">Field #{index + 1}</label><button onClick={() => handleRemoveExtractor(extractor.id)} disabled={extractors.length <= 1} className="text-gray-400 hover:text-red-600 disabled:text-gray-300 disabled:cursor-not-allowed transition-colors" aria-label="Remove extractor"><TrashIcon /></button></div><div className="grid grid-cols-1 gap-4"><input type="text" value={extractor.name} onChange={(e) => handleExtractorChange(extractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name (e.g., quote_text)" className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" /><div className="flex items-center gap-2"><input type="text" value={extractor.tag} onChange={(e) => handleExtractorChange(extractor.id, 'tag', e.target.value)} placeholder="HTML Tag (e.g., span)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(extractor.id === selectingFor ? null : extractor.id)} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === extractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select element from preview"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', extractor.id, extractor.tag, extractor.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test this field"><PlayIcon /></button></div><textarea value={extractor.attrs} onChange={(e) => handleExtractorChange(extractor.id, 'attrs', e.target.value)} placeholder="Attributes (e.g., class=text)" rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
+                      {testResult && (<div className={`mt-2 p-2 text-xs rounded border ${testResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}><p className="font-semibold">{testResult.preview}</p></div>)}</div></div>);})}</div>
+                      <button onClick={handleAddExtractor} className="mt-4 flex items-center justify-center w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors"><PlusIcon />Add Field</button>
+                    </div>
                   )}
                 </>
               ) : ( // Simple Mode
