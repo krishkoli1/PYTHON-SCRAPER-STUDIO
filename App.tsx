@@ -11,6 +11,9 @@ import { PlayIcon } from './components/icons/PlayIcon';
 import { GoogleGenAI, Type } from '@google/genai';
 
 const App: React.FC = () => {
+  const [apiKey, setApiKey] = useState<string>('');
+  const [apiKeyInput, setApiKeyInput] = useState<string>('');
+  
   const [step, setStep] = useState<number>(1);
   const [startMethod, setStartMethod] = useState<'url' | 'file'>('url');
   const [url, setUrl] = useState<string>('');
@@ -48,6 +51,14 @@ const App: React.FC = () => {
   const [testResults, setTestResults] = useState<{ [key: number]: { count: number; preview: string; error?: boolean } }>({});
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('csv');
 
+  const handleApiKeySubmit = () => {
+    if (apiKeyInput.trim()) {
+      setApiKey(apiKeyInput.trim());
+      setError('');
+    } else {
+      setError('Please enter a valid API key.');
+    }
+  };
 
   const handleUrlSubmit = () => {
     const urlToValidate = scrapingScope === 'multi' && multiPageMode === 'url' ? urlPrefix : url;
@@ -185,6 +196,8 @@ const App: React.FC = () => {
   };
 
   const handleStartOver = () => {
+    setApiKey('');
+    setApiKeyInput('');
     setStep(1);
     setStartMethod('url');
     setUrl('');
@@ -339,7 +352,7 @@ const App: React.FC = () => {
     setAutoDetectLoading(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: apiKey });
       const prompt = `Given the URL: "${url}". Find the page number in it. Replace that number with the placeholder "{page}". Return only the modified URL.`;
       
       const response = await ai.models.generateContent({
@@ -385,7 +398,7 @@ const App: React.FC = () => {
 
     setAutoFieldDetectLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey: apiKey });
       const prompt = `Given this HTML snippet of a single item in a list: \`\`\`html\n${firstContainer.outerHTML}\n\`\`\`
       Identify the key pieces of information a user would want to extract. For each piece of information, provide:
       1. A short, descriptive variable name in snake_case (e.g., product_title).
@@ -778,6 +791,45 @@ const App: React.FC = () => {
         return <div>Invalid Step</div>;
     }
   };
+
+  if (!apiKey) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+        <div className="w-full max-w-md">
+          <div className="bg-white rounded-xl shadow-lg p-8">
+            <h1 className="text-2xl font-bold text-gray-900 text-center">Welcome to the Python Scraper Studio</h1>
+            <p className="text-gray-600 mt-2 text-center">To use the AI-powered features, please enter your Google AI API Key.</p>
+            <div className="mt-6">
+              <label htmlFor="api-key-input" className="block text-sm font-medium text-gray-700">
+                Google AI API Key
+              </label>
+              <input
+                id="api-key-input"
+                type="password"
+                value={apiKeyInput}
+                onChange={(e) => setApiKeyInput(e.target.value)}
+                placeholder="Enter your API key here"
+                className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
+              />
+            </div>
+            {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+            <button
+              onClick={handleApiKeySubmit}
+              className="mt-6 w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
+            >
+              Continue
+            </button>
+             <p className="text-xs text-gray-500 mt-4 text-center">
+                You can get a key from {' '}
+                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">
+                    Google AI Studio
+                </a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
