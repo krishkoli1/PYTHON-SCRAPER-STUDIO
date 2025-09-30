@@ -1,4 +1,4 @@
-import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode } from '../types';
+import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type GenerateBsCodeParams } from '../types';
 
 interface GenerateSeleniumCodeParams {
   url: string;
@@ -8,35 +8,113 @@ interface GenerateSeleniumCodeParams {
   startPage: number;
   numPages: number;
   nextPageSelector: string;
+  browser: Browser;
+  delay: number;
   urlPrefix?: string;
   urlSuffix?: string;
+  proxyList?: string;
 }
 
-export const generateSeleniumCode = ({ url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix }: GenerateSeleniumCodeParams): string => {
-  const commonSetup = `from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-import time
+const getDriverSetupCode = (browser: Browser, proxyListCleaned: string): string => {
+  const hasProxy = !!proxyListCleaned;
+  let imports = new Set<string>();
+  let setupCode = '';
+
+  const proxySetup = `# --- Proxy Configuration ---
+proxies = [
+    "${proxyListCleaned.split('\n').join('",\n    "')}"
+]
+chosen_proxy = random.choice(proxies)
+print(f"Using proxy: {chosen_proxy}")`;
+
+  if (browser === 'firefox') {
+    imports.add('from selenium.webdriver.firefox.service import Service as FirefoxService');
+    imports.add('from webdriver_manager.firefox import GeckoDriverManager');
+    if (hasProxy) {
+      imports.add('import random');
+      imports.add('from selenium.webdriver.common.proxy import Proxy, ProxyType');
+      setupCode = `${proxySetup}
+proxy = Proxy({
+    'proxyType': ProxyType.MANUAL,
+    'httpProxy': chosen_proxy,
+    'sslProxy': chosen_proxy,
+})
+options = webdriver.FirefoxOptions()
+options.proxy = proxy
+driver = webdriver.Firefox(service=FirefoxService(GeckoDriverManager().install()), options=options)`;
+    } else {
+      setupCode = 'driver = webdriver.Firefox(service=FirefoxService(GeckoDriverManager().install()))';
+    }
+  } else if (browser === 'edge') {
+    imports.add('from selenium.webdriver.edge.service import Service as EdgeService');
+    imports.add('from webdriver_manager.microsoft import EdgeChromiumDriverManager');
+    if (hasProxy) {
+      imports.add('import random');
+      setupCode = `${proxySetup}
+options = webdriver.EdgeOptions()
+options.add_argument(f'--proxy-server={chosen_proxy}')
+driver = webdriver.Edge(service=EdgeService(EdgeChromiumDriverManager().install()), options=options)`;
+    } else {
+      setupCode = 'driver = webdriver.Edge(service=EdgeService(EdgeChromiumDriverManager().install()))';
+    }
+  } else { // Chrome, Brave, Opera
+    imports.add('from selenium.webdriver.chrome.service import Service as ChromeService');
+    imports.add('from webdriver_manager.chrome import ChromeDriverManager');
+    
+    let optionsLines = '';
+    if (hasProxy) {
+      imports.add('import random');
+      optionsLines += `${proxySetup}
+options = webdriver.ChromeOptions()
+options.add_argument(f'--proxy-server={chosen_proxy}')`;
+    } else {
+      optionsLines = 'options = webdriver.ChromeOptions()';
+    }
+
+    if (browser === 'brave') {
+      optionsLines += '\\n# For Brave, you might need to specify the binary location if it is not found automatically\\n# options.binary_location = "/path/to/brave"';
+    } else if (browser === 'opera') {
+      optionsLines += '\\n# For Opera, you might need to specify the binary location if it is not found automatically\\n# options.binary_location = "/path/to/opera"';
+    }
+
+    setupCode = `${optionsLines}
+driver = webdriver.Chrome(service=ChromeService(ChromeDriverManager().install()), options=options)`;
+  }
+
+  const browserName = browser.charAt(0).toUpperCase() + browser.slice(1);
+  const indentedSetupCode = setupCode.trim().split('\n').map(line => `    ${line}`).join('\n');
+
+  return `${Array.from(imports).join('\n')}
+
+try:
+${indentedSetupCode}
+except Exception as e:
+    print(f"Error setting up ${browserName} Driver: {e}")
+    print("Please ensure ${browserName} is installed on your system.")
+    exit()`;
+};
+
+
+export const generateSeleniumCode = (params: GenerateSeleniumCodeParams): string => {
+  const { url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList, browser, delay } = params;
+  
+  const proxyListCleaned = proxyList?.trim() || '';
+  const driverSetup = getDriverSetupCode(browser, proxyListCleaned);
+  const delayInSeconds = delay / 1000;
+
+  const commonSetup = `import time
 import os
+from selenium import webdriver
+${driverSetup}
 
-# --- Setup Instructions ---
-# 1. Make sure you have Python installed.
-# 2. Install required libraries:
-#    pip install selenium webdriver-manager
-
-# --- Script ---
+# --- Configuration ---
 # The folder where all files will be saved
 folder_name = "${projectName}"
-os.makedirs(folder_name, exist_ok=True)
+# Time to wait for pages to load, in seconds. Increase for slower websites.
+ACTION_DELAY = ${delayInSeconds}
 
-# Initialize Chrome WebDriver
-# webdriver-manager will automatically download the correct driver for your Chrome version.
-try:
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-except Exception as e:
-    print(f"Error setting up Chrome Driver: {e}")
-    print("Please ensure Google Chrome is installed on your system.")
-    exit()
+# --- Script ---
+os.makedirs(folder_name, exist_ok=True)
 `;
 
   if (scrapingScope === 'single') {
@@ -48,9 +126,8 @@ print(f"Opening URL: {url}")
 driver.get(url)
 
 # Wait for the page to load dynamically.
-# Adjust the sleep time if the page needs more time to load all content.
-print("Waiting for page to load (5 seconds)...")
-time.sleep(5)
+print(f"Waiting for page to load ({ACTION_DELAY} seconds)...")
+time.sleep(ACTION_DELAY)
 
 # Save the page source to an HTML file
 file_name = os.path.join(folder_name, "dataset.html")
@@ -89,8 +166,8 @@ for i in range(pages_to_scrape):
     page_num = start_page + i
     print(f"\\nProcessing page {page_num}...")
     # Wait for the page to load dynamically.
-    # Adjust the sleep time if the page needs more time to load all content.
-    time.sleep(3)
+    print(f"Waiting for page to load ({ACTION_DELAY} seconds)...")
+    time.sleep(ACTION_DELAY)
     
     # Save the page source to an HTML file
     file_name = os.path.join(folder_name, f"dataset_{page_num}.html")
@@ -147,8 +224,8 @@ for page_num in range(start_page, end_page):
         continue # Skip to the next page if URL fails
 
     # Wait for the page to load dynamically.
-    # Adjust the sleep time if the page needs more time to load all content.
-    time.sleep(3)
+    print(f"Waiting for page to load ({ACTION_DELAY} seconds)...")
+    time.sleep(ACTION_DELAY)
     
     # Save the page source to an HTML file
     file_name = os.path.join(folder_name, f"dataset_{page_num}.html")
@@ -167,30 +244,36 @@ print("\\nScraping finished. Browser closed.")
 };
 
 const convertToCssSelector = (tag: string, attrs: string): string => {
-    if (!tag.trim()) return '';
     let selector = tag.trim();
     if (!attrs.trim()) return selector;
+
+    // Regex to parse attributes: key="value" or key='value' or key=value
+    // Handles multiple attributes separated by commas or spaces.
+    const attrsRegex = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
+    let match;
+
     try {
-        const parts = attrs.split(',').map(p => p.trim()).filter(p => p.includes('='));
-        for (const part of parts) {
-            const eqIndex = part.indexOf('=');
-            let key = part.substring(0, eqIndex).trim();
-            let value = part.substring(eqIndex + 1).trim();
-            if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-                value = value.substring(1, value.length - 1);
-            }
-            if (key && value) {
-                if (key.toLowerCase() === 'id') selector += `#${value.split(/\s+/)[0]}`;
-                else if (key.toLowerCase() === 'class') {
+        while ((match = attrsRegex.exec(attrs)) !== null) {
+            const key = match[1].toLowerCase();
+            // match[2] is for double quotes, [3] for single, [4] for no quotes
+            const value = match[2] ?? match[3] ?? match[4];
+
+            if (key && typeof value !== 'undefined') {
+                if (key === 'id') {
+                    // Use the first part of the ID, in case it contains spaces (though invalid, browsers allow it)
+                    selector += `#${value.split(/\s+/)[0]}`;
+                } else if (key === 'class') {
                     const classes = value.split(/\s+/).filter(Boolean).join('.');
                     if (classes) selector += `.${classes}`;
-                } else selector += `[${key}="${value.replace(/"/g, '\\"')}"]`;
+                } else {
+                    selector += `[${key}="${value.replace(/"/g, '\\"')}"]`;
+                }
             }
         }
         return selector;
     } catch (e) {
         console.error("Error creating selector from attributes:", attrs, e);
-        return tag.trim();
+        return tag.trim(); // Fallback to just the tag on error
     }
 };
 
@@ -199,7 +282,7 @@ const getStructuredExtractionLogic = (container: Omit<Extractor, 'id' | 'name'>,
     return `    # Find all the container elements
     container_selector = "${containerSelector}"
     containers = soup.select(container_selector)
-    print(f"    Found {len(containers)} containers in this file.")
+    print(f"    Found {len(containers)} containers for this URL.")
 
     # Extract data from each container
     for c in containers:
@@ -217,14 +300,14 @@ const getSimpleExtractionLogic = (extractor: Extractor): string => {
     return `    # Find all matching elements on the page
     selector = "${selector}"
     elements = soup.select(selector)
-    print(f"    Found {len(elements)} matching elements in this file.")
+    print(f"    Found {len(elements)} matching elements for this URL.")
 
     # Extract the text content from each element
     for el in elements:
         all_data.append(el.get_text(strip=True))`;
 };
 
-const getOutputLogic = (scrapingMode: ScrapingMode, outputFormat: OutputFormat, extractorName: string): string => {
+const getOutputLogic = (scrapingMode: ScrapingMode, outputFormat: OutputFormat, extractorName: string, projectName: string): string => {
     const dataListName = 'all_data';
 
     const structuredCsv = `# --- Save data to CSV ---
@@ -288,8 +371,11 @@ else:
 
     const printOutput = `# --- Print Extracted Data ---
 print("\\n--- Extracted Data ---")
-for item in ${dataListName}:
-    print(item)`;
+if not ${dataListName}:
+    print("No data was extracted.")
+else:
+    for item in ${dataListName}:
+        print(item)`;
 
     if (scrapingMode === 'structured') {
         if (outputFormat === 'csv') return structuredCsv;
@@ -302,45 +388,109 @@ for item in ${dataListName}:
     }
 };
 
-
-interface GenerateBsCodeParams {
-    projectName: string;
-    scrapingMode: ScrapingMode;
-    container: Omit<Extractor, 'id' | 'name'>;
-    extractors: Extractor[];
-    outputFormat: OutputFormat;
-    scrapingScope: ScrapingScope;
-    startPage: number;
-    numPages: number;
-}
-
 export const generateBeautifulSoupCode = (params: GenerateBsCodeParams): string => {
-    const { projectName, scrapingMode, container, extractors, outputFormat, scrapingScope, startPage, numPages } = params;
+    const { projectName, scrapingMode, container, extractors, outputFormat, source, url, urlPrefix, urlSuffix, proxyList, delay, browser } = params;
   
     if ((scrapingMode === 'structured' && (!container.tag || extractors.length === 0)) || (scrapingMode === 'simple' && !extractors[0]?.tag)) {
-        return `# Please complete the definitions in Step 4 to generate the script.
-# - For Structured Data, define a container and at least one field.
-# - For a Simple List, define the single field you want to extract.`;
+        return `# Please complete the definitions in the 'Define Extractors' step to generate the script.
+# - For 'Structured Data', define a container and at least one field.
+# - For a 'Simple List', define the single field you want to extract.`;
     }
-
-    const imports = new Set<string>(['from bs4 import BeautifulSoup', 'import os']);
-    if (outputFormat === 'csv') imports.add('import csv');
-    if (outputFormat === 'json') imports.add('import json');
-
-    let fileNamesPythonList: string;
-    if (scrapingScope === 'single') {
-        fileNamesPythonList = '["dataset.html"]';
-    } else {
-        const fileNames = Array.from({ length: numPages }, (_, i) => `"dataset_${startPage + i}.html"`);
-        fileNamesPythonList = `[${fileNames.join(', ')}]`;
-    }
-
 
     const extractionLogic = scrapingMode === 'structured'
         ? getStructuredExtractionLogic(container, extractors)
         : getSimpleExtractionLogic(extractors[0]);
         
-    const outputLogic = getOutputLogic(scrapingMode, outputFormat, extractors[0].name);
+    const outputLogic = getOutputLogic(scrapingMode, outputFormat, extractors[0].name, projectName);
+    
+    // --- STATIC: LIVE URL SCRAPING ---
+    if (source === 'live-url') {
+        const proxyListCleaned = proxyList?.trim() || '';
+        const imports = new Set<string>(['from bs4 import BeautifulSoup', 'import os', 'import requests', 'import time']);
+        if (outputFormat === 'csv') imports.add('import csv');
+        if (outputFormat === 'json') imports.add('import json');
+        if (proxyListCleaned) imports.add('import random');
+
+        let urlListLogic: string;
+        // Determine if it's single or multi-page based on whether urlPrefix is provided
+        if (urlPrefix) {
+             urlListLogic = `urls = []
+url_prefix = "${urlPrefix.replace(/"/g, '\\"')}"
+url_suffix = "${urlSuffix.replace(/"/g, '\\"')}"
+# Note: You may need to adjust start_page and end_page based on your static config
+start_page = 1 
+end_page = start_page + 5 
+for page_num in range(start_page, end_page):
+    urls.append(f"{url_prefix}{page_num}{url_suffix}")`;
+        } else {
+             urlListLogic = `urls = ["${url}"]`;
+        }
+
+        const proxySetup = proxyListCleaned ? `proxies = ["${proxyListCleaned.split('\n').join('", "')}"]` : 'proxies = []';
+        
+        return `${Array.from(imports).join('\n')}
+
+# --- Setup Instructions ---
+# 1. Make sure you have Python installed.
+# 2. Install required libraries:
+#    pip install beautifulsoup4 requests
+
+# --- Configuration ---
+folder_name = "${projectName}"
+# Time to wait between requests, in seconds. Be respectful of the website's servers.
+REQUEST_DELAY = ${delay ? delay / 1000 : 2}
+# A list to hold all data from all pages
+all_data = []
+# Browser user-agents to mimic a real browser visit
+USER_AGENTS = {
+    "chrome": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "firefox": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0",
+    "edge": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 Edg/91.0.864.48",
+    "brave": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    "opera": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36 OPR/77.0.4054.90",
+}
+# Your chosen browser user-agent
+headers = {'User-Agent': USER_AGENTS.get("${browser || 'chrome'}", USER_AGENTS["chrome"])}
+${proxySetup}
+
+# --- Script ---
+os.makedirs(folder_name, exist_ok=True)
+${urlListLogic}
+
+print(f"Starting to scrape {len(urls)} URL(s)...")
+for url in urls:
+    print(f"  - Scraping: {url}")
+    
+    proxy_to_use = {}
+    if proxies:
+        chosen_proxy = random.choice(proxies)
+        proxy_to_use = {"http": f"http://{chosen_proxy}", "https": f"http://{chosen_proxy}"}
+        print(f"    Using proxy: {chosen_proxy}")
+
+    try:
+        response = requests.get(url, headers=headers, proxies=proxy_to_use, timeout=10)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        print(f"    Error fetching URL {url}: {e}")
+        time.sleep(REQUEST_DELAY) # Wait before the next attempt
+        continue
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+${extractionLogic}
+    
+    print(f"    Waiting {REQUEST_DELAY} seconds before next request...")
+    time.sleep(REQUEST_DELAY)
+
+# --- Final Output ---
+${outputLogic}
+`;
+    }
+
+    // --- DYNAMIC or STATIC FROM FILE: LOCAL FILE PROCESSING ---
+    const imports = new Set<string>(['from bs4 import BeautifulSoup', 'import os']);
+    if (outputFormat === 'csv') imports.add('import csv');
+    if (outputFormat === 'json') imports.add('import json');
 
     return `${Array.from(imports).join('\n')}
 
@@ -348,28 +498,37 @@ export const generateBeautifulSoupCode = (params: GenerateBsCodeParams): string 
 # 1. Make sure you have Python installed.
 # 2. Install required libraries:
 #    pip install beautifulsoup4
+# 3. Place this script in the SAME directory as the '${projectName}' folder.
 
 # --- Script ---
 # The folder where HTML files are located and output will be saved
 folder_name = "${projectName}"
-# The list of files to process, based on your configuration in Step 1.
-file_names = ${fileNamesPythonList}
 all_data = []  # A list to hold all data from all files
 
-print(f"Processing {len(file_names)} file(s) from '{folder_name}' folder...")
+# Find all HTML files in the folder
+try:
+    file_names = [f for f in os.listdir(folder_name) if f.endswith('.html')]
+    if not file_names:
+        print(f"Error: No .html files found in the '{folder_name}' directory.")
+        exit()
+except FileNotFoundError:
+    print(f"Error: The directory '{folder_name}' does not exist. Make sure it's in the same location as this script.")
+    exit()
+
+print(f"Processing {len(file_names)} file(s) from the '{folder_name}' folder...")
 for file_name in file_names:
     file_path = os.path.join(folder_name, file_name)
     print(f"  - Reading {file_path}")
     try:
         with open(file_path, "r", encoding="utf-8") as f:
             html_content = f.read()
-    except FileNotFoundError:
-        print(f"    Error: The file '{file_path}' was not found. Skipping.")
+    except Exception as e:
+        print(f"    Error reading file '{file_path}': {e}")
         continue  # Skip to the next file
 
     soup = BeautifulSoup(html_content, "html.parser")
     
-${extractionLogic}
+${extractionLogic.replace('this URL', 'this file')}
 
 # --- Final Output ---
 ${outputLogic}

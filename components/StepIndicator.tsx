@@ -2,17 +2,12 @@ import React from 'react';
 
 interface StepIndicatorProps {
   currentStep: number;
+  steps: string[];
 }
 
-const steps = [
-  "Configure Scraper",
-  "Run Selenium",
-  "Upload Sample",
-  "Define Extractors",
-  "Get Scraper",
-];
+export const StepIndicator: React.FC<StepIndicatorProps> = ({ currentStep, steps }) => {
+  if (steps.length === 0) return null;
 
-export const StepIndicator: React.FC<StepIndicatorProps> = ({ currentStep }) => {
   return (
     <nav aria-label="Progress">
       <ol role="list" className="flex items-center">

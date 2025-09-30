@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode } from './types';
+import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type StaticSourceType } from './types';
 import { generateSeleniumCode, generateBeautifulSoupCode } from './services/codeGenerator';
 import { CodeBlock } from './components/CodeBlock';
 import { StepIndicator } from './components/StepIndicator';
@@ -10,15 +10,126 @@ import { CursorArrowRaysIcon } from './components/icons/CursorArrowRaysIcon';
 import { PlayIcon } from './components/icons/PlayIcon';
 import { GoogleGenAI, Type } from '@google/genai';
 
+type ScrapingType = 'dynamic' | 'static';
+type CurrentView = 'apiKey' | 'advisor' | 'app';
+type AiRecommendation = { recommendation: ScrapingType; reason: string; };
+
+
+const AiCodeDebugger: React.FC<{
+  apiKey: string;
+  originalCode: string;
+  codeType: 'Selenium' | 'BeautifulSoup';
+}> = ({ apiKey, originalCode, codeType }) => {
+  const [errorInput, setErrorInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [fixerError, setFixerError] = useState('');
+  const [fixedCode, setFixedCode] = useState<string | null>(null);
+
+  const handleFixCode = async () => {
+    if (!errorInput.trim()) {
+      setFixerError('Please paste the error message you received.');
+      return;
+    }
+    setFixerError('');
+    setIsLoading(true);
+    setFixedCode(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `You are an expert Python developer specializing in web scraping with ${codeType}.
+The user was given the following Python script to run:
+--- START OF SCRIPT ---
+${originalCode}
+--- END OF SCRIPT ---
+
+When they ran it, they encountered the following error:
+--- START OF ERROR ---
+${errorInput}
+--- END OF ERROR ---
+
+Your task is to analyze the script and the error message, identify the root cause of the error, and provide a corrected version of the full Python script.
+
+IMPORTANT:
+- Only return the complete, corrected Python code.
+- Do not add any explanations, apologies, or introductory text. Just provide the raw code.`;
+
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
+      const newCode = response.text.trim();
+      if (newCode) {
+        setFixedCode(newCode);
+      } else {
+        setFixerError('The AI could not generate a fix. Please check the error message or try again.');
+      }
+    } catch (e) {
+      console.error('Error fixing code with AI:', e);
+      setFixerError('An error occurred while trying to fix the code. Please check your API key and try again.');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="p-4 border-t-2 border-indigo-200 bg-indigo-50">
+      <h3 className="text-lg font-semibold text-gray-800">Debug with AI</h3>
+      <p className="text-sm text-gray-600 mt-1">If you get an error running the script, paste it below and the AI will attempt to fix it.</p>
+      <div className="mt-4">
+        <label htmlFor={`error-input-${codeType}`} className="block text-sm font-medium text-gray-700">Error Message</label>
+        <textarea
+          id={`error-input-${codeType}`}
+          rows={5}
+          value={errorInput}
+          onChange={(e) => setErrorInput(e.target.value)}
+          placeholder="Paste the entire error message here..."
+          className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm"
+          disabled={isLoading}
+        />
+      </div>
+      {fixerError && <p className="text-red-500 text-sm mt-2">{fixerError}</p>}
+      <div className="mt-4">
+        <button onClick={handleFixCode} className="w-full sm:w-auto bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center justify-center" disabled={isLoading}>
+          {isLoading ? (
+            <>
+              <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+              Generating Fix...
+            </>
+          ) : (
+            'Generate Fix'
+          )}
+        </button>
+      </div>
+
+      {fixedCode && (
+        <div className="mt-6">
+          <h4 className="text-md font-semibold text-green-800 bg-green-100 p-2 rounded-t-md">AI Generated Fix</h4>
+          <CodeBlock code={fixedCode} />
+        </div>
+      )}
+    </div>
+  );
+};
+
+
 const App: React.FC = () => {
+  const [currentView, setCurrentView] = useState<CurrentView>('apiKey');
   const [apiKey, setApiKey] = useState<string>('');
   const [apiKeyInput, setApiKeyInput] = useState<string>('');
   
+  const [analysisUrl, setAnalysisUrl] = useState<string>('');
+  const [analysisLoading, setAnalysisLoading] = useState<boolean>(false);
+  const [analysisResult, setAnalysisResult] = useState<AiRecommendation | null>(null);
+
   const [step, setStep] = useState<number>(1);
-  const [startMethod, setStartMethod] = useState<'url' | 'file'>('url');
+  const [scrapingType, setScrapingType] = useState<ScrapingType | null>(null);
+  const [staticSource, setStaticSource] = useState<StaticSourceType | null>(null);
+
   const [url, setUrl] = useState<string>('');
   const [projectName, setProjectName] = useState<string>('scraping_project');
   const [htmlContents, setHtmlContents] = useState<{ name: string; content: string }[]>([]);
+
+  const [useProxy, setUseProxy] = useState<boolean>(false);
+  const [proxyList, setProxyList] = useState<string>('');
+  
+  const [browser, setBrowser] = useState<Browser>('chrome');
+  const [delay, setDelay] = useState<number>(5000);
 
   const [scrapingScope, setScrapingScope] = useState<ScrapingScope>('single');
   const [multiPageMode, setMultiPageMode] = useState<MultiPageMode>('button');
@@ -27,12 +138,14 @@ const App: React.FC = () => {
   const [nextPageSelector, setNextPageSelector] = useState<string>('li.next > a');
   const [urlPrefix, setUrlPrefix] = useState<string>('');
   const [urlSuffix, setUrlSuffix] = useState<string>('');
-  const [autoDetectLoading, setAutoDetectLoading] = useState<boolean>(false);
+  const [autoDetectUrlLoading, setAutoDetectUrlLoading] = useState<boolean>(false);
+  const [autoDetectSelectorLoading, setAutoDetectSelectorLoading] = useState<boolean>(false);
+  const [startPageHtml, setStartPageHtml] = useState<string>('');
   
   const [scrapingMode, setScrapingMode] = useState<ScrapingMode>('structured');
   const [container, setContainer] = useState<Omit<Extractor, 'id' | 'name'>>({ tag: '', attrs: '' });
   const [containerTestResult, setContainerTestResult] = useState<{ count: number; preview: string; error?: boolean } | null>(null);
-  const [isContainerSet, setIsContainerSet] = useState<boolean>(false);
+  const [isContainerSet, setContainerSet] = useState<boolean>(false);
   
   const [extractionMethod, setExtractionMethod] = useState<'auto' | 'manual' | null>(null);
   const [autoFieldDetectLoading, setAutoFieldDetectLoading] = useState<boolean>(false);
@@ -50,159 +163,28 @@ const App: React.FC = () => {
   
   const [testResults, setTestResults] = useState<{ [key: number]: { count: number; preview: string; error?: boolean } }>({});
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('csv');
-
+  
   const handleApiKeySubmit = () => {
     if (apiKeyInput.trim()) {
       setApiKey(apiKeyInput.trim());
       setError('');
+      setCurrentView('advisor');
     } else {
       setError('Please enter a valid API key.');
     }
   };
 
-  const handleUrlSubmit = () => {
-    const urlToValidate = scrapingScope === 'multi' && multiPageMode === 'url' ? urlPrefix : url;
-    if (!urlToValidate || !urlToValidate.startsWith('http')) {
-      setError('Please enter a valid URL (e.g., https://example.com)');
-      return;
-    }
-    if (scrapingScope === 'multi' && multiPageMode === 'url' && !urlPrefix) {
-      setError('Please provide a URL prefix for the URL pattern.');
-      return;
-    }
-
-    setError('');
-    const code = generateSeleniumCode({ 
-        url, 
-        projectName,
-        scrapingScope, 
-        multiPageMode, 
-        startPage, 
-        numPages, 
-        nextPageSelector,
-        urlPrefix,
-        urlSuffix
-    });
-    setSeleniumCode(code);
-    setStep(2);
-  };
-
-  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files;
-    if (files && files.length > 0) {
-      setError('');
-      const file = files[0]; // Only process the first file as a sample
-      
-      if (file.type === 'text/html') {
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          const content = e.target?.result as string;
-          setHtmlContents([{ name: file.name, content }]);
-          if (step !== 4) { // Don't auto-advance if already on the extractor page
-            setStep(4); 
-          }
-        };
-        reader.onerror = () => {
-          setError(`Error reading file ${file.name}.`);
-        };
-        reader.readAsText(file);
-      } else {
-        setError(`File ${file.name} is not a valid .html file.`);
-      }
-    }
-    event.target.value = ''; // Reset file input
-  };
-
-  const handleAddExtractor = () => {
-    setExtractors([
-      ...extractors,
-      { id: Date.now(), name: `item_${extractors.length + 1}`, tag: '', attrs: '' },
-    ]);
-  };
-
-  const handleRemoveExtractor = (id: number) => {
-    if (extractors.length > 1) {
-      setExtractors(extractors.filter((e) => e.id !== id));
-      const newTestResults = { ...testResults };
-      delete newTestResults[id];
-      setTestResults(newTestResults);
-    }
-  };
-
-  const handleExtractorChange = useCallback((id: number, field: keyof Omit<Extractor, 'id'>, value: string) => {
-    setExtractors(prev =>
-      prev.map((e) => (e.id === id ? { ...e, [field]: value } : e))
-    );
-    const newTestResults = { ...testResults };
-    delete newTestResults[id];
-    setTestResults(newTestResults);
-  }, [testResults]);
-  
-  const handleContainerChange = useCallback((field: 'tag' | 'attrs', value: string) => {
-    setContainer(prev => ({ ...prev, [field]: value }));
-    setContainerTestResult(null);
-    setIsContainerSet(false); // Force re-test on any change
-    setExtractionMethod(null); // Reset choice when container changes
-  }, []);
-  
-  const handleModeChange = (mode: ScrapingMode) => {
-      setScrapingMode(mode);
-      // Reset state when switching modes to avoid confusion
-      setContainer({ tag: '', attrs: '' });
-      setContainerTestResult(null);
-      setIsContainerSet(false);
-      setExtractionMethod(null);
-      setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
-      setTestResults({});
-      setError('');
-  }
-
-  const handleGenerateBsCode = () => {
-    setError('');
-    if (scrapingMode === 'structured') {
-        if (!isContainerSet || !container.tag) {
-            setError('Please define and successfully test a container before generating the code.');
-            return;
-        }
-        if (extractors.length === 0 && extractionMethod !== 'auto') {
-            setError('Please add at least one field to extract.');
-            return;
-        }
-        const invalidExtractor = extractors.find(e => !e.name.trim() || !e.tag.trim());
-        if (invalidExtractor) {
-            setError('Please fill in all field names and HTML tags for extraction.');
-            return;
-        }
-    } else { // simple mode
-        const singleExtractor = extractors[0];
-        if (!singleExtractor.name.trim() || !singleExtractor.tag.trim()) {
-            setError('Please fill in the field name and HTML tag for extraction.');
-            return;
-        }
-    }
-    
-    const code = generateBeautifulSoupCode({
-        projectName,
-        scrapingMode,
-        container,
-        extractors,
-        outputFormat,
-        scrapingScope,
-        startPage,
-        numPages,
-    });
-    setBsCode(code);
-    setStep(5);
-  };
-
-  const handleStartOver = () => {
-    setApiKey('');
-    setApiKeyInput('');
+  const resetAllState = () => {
     setStep(1);
-    setStartMethod('url');
+    setScrapingType(null);
+    setStaticSource(null);
     setUrl('');
     setProjectName('scraping_project');
     setHtmlContents([]);
+    setUseProxy(false);
+    setProxyList('');
+    setBrowser('chrome');
+    setDelay(5000);
     setScrapingScope('single');
     setMultiPageMode('button');
     setStartPage(1);
@@ -219,45 +201,273 @@ const App: React.FC = () => {
     setSelectingFor(null);
     setTestResults({});
     setContainerTestResult(null);
-    setIsContainerSet(false);
+    setContainerSet(false);
     setExtractionMethod(null);
     setOutputFormat('csv');
+    setStartPageHtml('');
+    setAutoDetectUrlLoading(false);
+    setAutoDetectSelectorLoading(false);
+  };
+
+  const handleStartOver = () => {
+    resetAllState();
+    setAnalysisUrl('');
+    setAnalysisResult(null);
+    setCurrentView('apiKey');
+    setApiKey('');
+    setApiKeyInput('');
+  };
+
+  const handleAnalyzeUrl = async () => {
+    if (!analysisUrl.trim() || !analysisUrl.startsWith('http')) {
+      setError('Please enter a valid URL (e.g., https://example.com)');
+      return;
+    }
+    setError('');
+    setAnalysisLoading(true);
+    setAnalysisResult(null);
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `You are a web scraping expert. Your task is to analyze a given URL and recommend the best scraping method.
+
+The two methods are:
+1.  **Dynamic Scraping (Selenium)**: Use this for modern, complex websites that rely on JavaScript to load content, are built with frameworks like React/Vue/Angular, have infinite scroll, or require user interaction to reveal data. This method is more robust and handles more complex scenarios.
+2.  **Static Scraping (BeautifulSoup & Requests)**: Use this for simpler, traditional websites (like blogs, news articles, forums) where all the content is present in the initial HTML source code. This is faster but less powerful.
+
+**Critical Analysis:**
+- When analyzing the URL, consider the website's complexity.
+- **Crucial Rule:** Websites like Kaggle.com (for datasets) and GeeksforGeeks.org (for articles) often use JavaScript to load their main content dynamically or to protect against bots. They are prime examples that **must be classified as "dynamic"**.
+- If a website is known to be a Single Page Application (SPA), it is always "dynamic".
+- If you are unsure, err on the side of caution. **Recommending "dynamic" is the safer choice** because a dynamic scraper can handle a static site, but a static scraper will fail on a dynamic site.
+
+Analyze the website at this URL: ${analysisUrl}
+
+Based on this analysis, decide which method is more appropriate.
+
+Respond with a JSON object with two keys:
+- "recommendation": A string, either "dynamic" or "static".
+- "reason": A short, user-friendly explanation (1-2 sentences) for your choice.`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              recommendation: { type: Type.STRING },
+              reason: { type: Type.STRING },
+            },
+            required: ['recommendation', 'reason'],
+          },
+        },
+      });
+      const result = JSON.parse(response.text.trim()) as AiRecommendation;
+      setAnalysisResult(result);
+    } catch (e) {
+      console.error('Error analyzing URL with AI:', e);
+      setError('An error occurred during AI analysis. Please check the URL and your API key, or choose a method manually.');
+    } finally {
+      setAnalysisLoading(false);
+    }
   };
   
-  const handleBack = () => {
-    if (step > 1) {
-      setError('');
-      setSelectingFor(null); // Exit selection mode when going back
-      if (scrapingMode === 'structured') {
-        setIsContainerSet(false);
-        setContainerTestResult(null);
-        setExtractionMethod(null);
+  const handleProceedWithRecommendation = () => {
+      if (analysisResult) {
+          setScrapingType(analysisResult.recommendation);
+          setUrl(analysisUrl);
+          setCurrentView('app');
       }
-      if (step === 4 && startMethod === 'file') {
-        setStep(1);
-        setHtmlContents([]); // Clear preview
+  };
+
+  const validateUrlConfig = () => {
+    const isStaticUrlScrape = scrapingType === 'static' && staticSource === 'url';
+    const urlToValidate = scrapingScope === 'multi' && (multiPageMode === 'url' || isStaticUrlScrape) ? urlPrefix : url;
+    if (!urlToValidate || !urlToValidate.startsWith('http')) {
+        setError('Please enter a valid URL (e.g., https://example.com)');
+        return false;
+    }
+    if (scrapingScope === 'multi' && (multiPageMode === 'url' || isStaticUrlScrape) && !urlPrefix) {
+        setError('Please provide a URL prefix for the URL pattern.');
+        return false;
+    }
+    setError('');
+    return true;
+  }
+
+  const handleNextFromDynamicConfig = () => {
+    if (!validateUrlConfig()) return;
+    
+    if (useProxy) {
+      setStep(2); // Go to proxy step
+    } else {
+      const code = generateSeleniumCode({ url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList: '', browser, delay, });
+      setSeleniumCode(code);
+      setStep(2); // Go to Selenium script step
+    }
+  };
+  
+  const handleNextFromStaticUrlConfig = () => {
+      if (!validateUrlConfig()) return;
+      if (htmlContents.length === 0) {
+          setError('Please upload a sample HTML file to continue.');
+          return;
+      }
+      if (useProxy) {
+        setStep(2); // Go to proxy step
       } else {
-        setStep(prevStep => prevStep - 1);
+        setStep(2); // Go to extractor step
       }
+  }
+
+  const handleGenerateSeleniumWithProxy = () => {
+    if (useProxy && !proxyList.trim()) {
+      setError('Please provide a list of proxies or disable the proxy option.');
+      return;
+    }
+    setError('');
+    const code = generateSeleniumCode({ url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList: proxyList, browser, delay, });
+    setSeleniumCode(code);
+    setStep(3); // Go to Selenium script step
+  };
+
+  const handleProxyFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setError('');
+      if (file.type === 'text/plain') {
+        const reader = new FileReader();
+        reader.onload = (e) => setProxyList(e.target?.result as string);
+        reader.onerror = () => setError(`Error reading file ${file.name}.`);
+        reader.readAsText(file);
+      } else { setError(`File ${file.name} is not a valid .txt file.`); }
+    }
+     event.target.value = '';
+  };
+  
+  const handleStartPageHtmlUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) {
+      setError('');
+      if (file.type === 'text/html') {
+        const reader = new FileReader();
+        reader.onload = (e) => setStartPageHtml(e.target?.result as string);
+        reader.onerror = () => setError(`Error reading file ${file.name}.`);
+        reader.readAsText(file);
+      } else { setError(`File ${file.name} is not a valid .html file.`); }
+    }
+    event.target.value = '';
+  };
+
+  const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (files && files.length > 0) {
+      setError('');
+      const file = files[0];
+      if (file.type === 'text/html') {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const content = e.target?.result as string;
+          setHtmlContents([{ name: file.name, content }]);
+        };
+        reader.onerror = () => setError(`Error reading file ${file.name}.`);
+        reader.readAsText(file);
+      } else { setError(`File ${file.name} is not a valid .html file.`); }
+    }
+    event.target.value = '';
+  };
+
+  const handleAddExtractor = () => setExtractors([...extractors, { id: Date.now(), name: `item_${extractors.length + 1}`, tag: '', attrs: '' }]);
+
+  const handleRemoveExtractor = (id: number) => {
+    if (extractors.length > 1) {
+      setExtractors(extractors.filter((e) => e.id !== id));
+      const newTestResults = { ...testResults };
+      delete newTestResults[id];
+      setTestResults(newTestResults);
+    }
+  };
+
+  const handleExtractorChange = useCallback((id: number, field: keyof Omit<Extractor, 'id'>, value: string) => {
+    setExtractors(prev => prev.map((e) => (e.id === id ? { ...e, [field]: value } : e)));
+    const newTestResults = { ...testResults };
+    delete newTestResults[id];
+    setTestResults(newTestResults);
+  }, [testResults]);
+  
+  const handleContainerChange = useCallback((field: 'tag' | 'attrs', value: string) => {
+    setContainer(prev => ({ ...prev, [field]: value }));
+    setContainerTestResult(null);
+    setContainerSet(false);
+    setExtractionMethod(null);
+  }, []);
+  
+  const handleModeChange = (mode: ScrapingMode) => {
+      setScrapingMode(mode);
+      setContainer({ tag: '', attrs: '' });
+      setContainerTestResult(null);
+      setContainerSet(false);
+      setExtractionMethod(null);
+      setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
+      setTestResults({});
+      setError('');
+  }
+
+  const handleGenerateBsCode = () => {
+    setError('');
+    if (scrapingMode === 'structured') {
+        if (!isContainerSet || !container.tag) { setError('Please define and successfully test a container before generating the code.'); return; }
+        if (extractors.length === 0 && extractionMethod !== 'auto') { setError('Please add at least one field to extract.'); return; }
+        const invalidExtractor = extractors.find(e => !e.name.trim() || !e.tag.trim());
+        if (invalidExtractor) { setError('Please fill in all field names and HTML tags for extraction.'); return; }
+    } else {
+        const singleExtractor = extractors[0];
+        if (!singleExtractor.name.trim() || !singleExtractor.tag.trim()) { setError('Please fill in the field name and HTML tag for extraction.'); return; }
+    }
+    setStep(prev => prev + 1);
+  };
+
+  const handleBack = () => {
+    setError('');
+    setSelectingFor(null);
+    setContainerSet(false);
+    setContainerTestResult(null);
+    setExtractionMethod(null);
+
+    if (step > 1) {
+      setStep(prevStep => prevStep - 1);
+    } else if (scrapingType === 'static' && staticSource) {
+      setStaticSource(null);
+    } else if (scrapingType) {
+      setScrapingType(null); // Go back to method selection
+    } else {
+      setCurrentView('advisor'); // Go back to advisor
     }
   };
 
   const convertToSelector = (t: string, a: string): string => {
     let selector = t.trim();
     if (!a.trim()) return selector;
+
+    // Regex to parse attributes: key="value" or key='value' or key=value
+    // Handles multiple attributes separated by commas or spaces.
+    const attrsRegex = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
+    let match;
+
     try {
-        const parts = a.split(',').map(p => p.trim()).filter(p => p);
-        for (const part of parts) {
-            const eqIndex = part.indexOf('=');
-            if (eqIndex === -1) continue;
-            const key = part.substring(0, eqIndex).trim();
-            const value = part.substring(eqIndex + 1).trim();
-            if (key && value) {
-                if (key.toLowerCase() === 'id') {
-                    selector += `#${value.replace(/\s/g, '#')}`;
-                } else if (key.toLowerCase() === 'class') {
+        while ((match = attrsRegex.exec(a)) !== null) {
+            const key = match[1].toLowerCase();
+            // match[2] is for double quotes, [3] for single, [4] for no quotes
+            const value = match[2] ?? match[3] ?? match[4];
+
+            if (key && typeof value !== 'undefined') {
+                if (key === 'id') {
+                    // Use the first part of the ID, in case it contains spaces (though invalid, browsers allow it)
+                    selector += `#${value.split(/\s+/)[0]}`;
+                } else if (key === 'class') {
                     const classes = value.split(/\s+/).filter(Boolean).join('.');
-                    if(classes) selector += `.${classes}`;
+                    if (classes) selector += `.${classes}`;
                 } else {
                     selector += `[${key}="${value.replace(/"/g, '\\"')}"]`;
                 }
@@ -265,6 +475,7 @@ const App: React.FC = () => {
         }
         return selector;
     } catch (e) {
+        console.error("Error creating selector:", e);
         return 'INVALID_SELECTOR_DUE_TO_ATTR_PARSE_ERROR';
     }
   };
@@ -273,40 +484,30 @@ const App: React.FC = () => {
       const iframeDoc = iframeRef.current?.contentDocument;
       if (!tag.trim() || !iframeDoc) {
           const result = { count: 0, preview: 'HTML Tag is empty.', error: true };
-          if(type === 'container') {
-              setContainerTestResult(result);
-              setIsContainerSet(false);
-          }
+          if(type === 'container') { setContainerTestResult(result); setContainerSet(false); }
           else setTestResults(prev => ({ ...prev, [id]: result }));
           return;
       }
       
       const selector = convertToSelector(tag, attrs);
-
       try {
           if (type === 'container') {
               const matches = iframeDoc.querySelectorAll(selector);
               const count = matches.length;
               const isSuccess = count > 0;
-              const preview = `Found ${count} repeating container elements.`;
-              setContainerTestResult({ count, preview, error: !isSuccess });
-              setIsContainerSet(isSuccess);
-              if (!isSuccess) {
-                setExtractionMethod(null);
-              }
-          } else { // extractor
+              setContainerTestResult({ count, preview: `Found ${count} repeating container elements.`, error: !isSuccess });
+              setContainerSet(isSuccess);
+              if (!isSuccess) setExtractionMethod(null);
+          } else {
              if (scrapingMode === 'structured' && container.tag) {
                    const containerSelector = convertToSelector(container.tag, container.attrs);
                    const containers = iframeDoc.querySelectorAll(containerSelector);
                    if (containers.length > 0) {
                      const matchesInContainers = Array.from(containers).filter((c: Element) => c.querySelector(selector));
                      const count = matchesInContainers.length;
-                     const preview = `${count} of ${containers.length} containers have a match.`;
-                     setTestResults(prev => ({ ...prev, [id]: { count, preview, error: count === 0 }}));
-                   } else {
-                      setTestResults(prev => ({ ...prev, [id]: { count: 0, preview: 'No containers found to test within.', error: true }}));
-                   }
-              } else { // simple mode or container not set
+                     setTestResults(prev => ({ ...prev, [id]: { count, preview: `${count} of ${containers.length} containers have a match.`, error: count === 0 }}));
+                   } else { setTestResults(prev => ({ ...prev, [id]: { count: 0, preview: 'No containers found to test within.', error: true }})); }
+              } else {
                   const matches = iframeDoc.querySelectorAll(selector);
                   const count = matches.length;
                   const preview = `Found ${count} total matches. Preview: ` + Array.from(matches).slice(0, 3).map((el: Element) => (el.textContent || '').trim().slice(0, 20).concat('...')).join(' | ');
@@ -315,87 +516,89 @@ const App: React.FC = () => {
           }
       } catch (e) {
           const result = { count: 0, preview: 'Invalid Tag or Attributes for testing.', error: true };
-           if(type === 'container') {
-              setContainerTestResult(result);
-              setIsContainerSet(false);
-              setExtractionMethod(null);
-          }
+           if(type === 'container') { setContainerTestResult(result); setContainerSet(false); setExtractionMethod(null); }
           else setTestResults(prev => ({ ...prev, [id]: result }));
       }
   }, [container, scrapingMode]);
 
   const generateExtractorDetails = (el: HTMLElement): { tag: string; attrs: string } => {
     const tag = el.tagName.toLowerCase();
+    
+    // 1. Prioritize ID if it exists and seems stable
+    if (el.id && !/^\d+$/.test(el.id)) {
+        return { tag, attrs: `id=${el.id}` };
+    }
+
     const attrsArray: string[] = [];
-  
-    for (let i = 0; i < el.attributes.length; i++) {
-        const attr = el.attributes[i];
-        const name = attr.name.toLowerCase();
-        const value = attr.value;
-  
-        if (!value || name === 'id' || name === 'style' || name.startsWith('on')) {
-            continue;
+    
+    // 2. Use class if it exists and is not empty
+    if (el.className && typeof el.className === 'string' && el.className.trim()) {
+        attrsArray.push(`class="${el.className.trim()}"`);
+    }
+
+    // 3. Fallback to other meaningful attributes if no class and no ID was used
+    if (attrsArray.length === 0) {
+        for (let i = 0; i < el.attributes.length; i++) {
+            const attr = el.attributes[i];
+            const name = attr.name.toLowerCase();
+            const value = attr.value;
+
+            // Ignore irrelevant or unstable attributes
+            if (!value || ['id', 'class', 'style'].includes(name) || name.startsWith('on')) {
+                continue;
+            }
+            
+            // Only consider attributes that are good for selection
+            if (['href', 'src', 'alt', 'title', 'role', 'type', 'name'].some(p => name.startsWith(p)) || name.startsWith('data-')) {
+                 attrsArray.push(`${name}="${value}"`);
+            }
         }
-  
-        attrsArray.push(`${name}=${value}`);
     }
     
     return { tag, attrs: attrsArray.join(', ') };
   };
 
-  const handleAutoDetectPattern = async () => {
-    if (!url || !url.startsWith('http')) {
-      setError('Please enter a valid example URL first.');
-      return;
-    }
+  const handleAutoDetectUrlPattern = async () => {
+    if (!url || !url.startsWith('http')) { setError('Please enter a valid example URL first.'); return; }
     setError('');
-    setAutoDetectLoading(true);
-
+    setAutoDetectUrlLoading(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: apiKey });
+      const ai = new GoogleGenAI({ apiKey });
       const prompt = `Given the URL: "${url}". Find the page number in it. Replace that number with the placeholder "{page}". Return only the modified URL.`;
-      
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-      });
-
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
       const pattern = response.text.trim();
       const placeholder = '{page}';
-
       if (pattern.includes(placeholder)) {
         const parts = pattern.split(placeholder);
         setUrlPrefix(parts[0]);
         setUrlSuffix(parts[1] || '');
-      } else {
-        setError('AI could not detect a page number pattern. Please set the prefix and suffix manually.');
-        setUrlPrefix(url);
-        setUrlSuffix('');
-      }
-    } catch (e) {
-      console.error('Error detecting URL pattern with AI:', e);
-      setError('An error occurred during AI pattern detection.');
-    } finally {
-      setAutoDetectLoading(false);
-    }
+      } else { setError('AI could not detect a page number pattern. Please set the prefix and suffix manually.'); setUrlPrefix(url); setUrlSuffix(''); }
+    } catch (e) { console.error('Error detecting URL pattern with AI:', e); setError('An error occurred during AI pattern detection.');
+    } finally { setAutoDetectUrlLoading(false); }
+  };
+
+  const handleAutoDetectNextSelector = async () => {
+    if (!startPageHtml) { setError('Please upload the start page HTML file first to enable detection.'); return; }
+    setError('');
+    setAutoDetectSelectorLoading(true);
+    try {
+      const ai = new GoogleGenAI({ apiKey });
+      const prompt = `Analyze the following HTML content and identify the element that functions as the 'Next Page' button or link in a pagination control. Provide a precise and robust CSS selector for this element. The element might contain text like "Next", ">", or "»". Return ONLY the CSS selector as a single line of text.`;
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: [{text: prompt}, {text: startPageHtml}] });
+      const selector = response.text.trim();
+      if (selector) { setNextPageSelector(selector); } 
+      else { setError("AI could not determine a 'Next Page' selector. Please enter one manually."); }
+    } catch (e) { console.error('Error auto-detecting next selector with AI:', e); setError('An error occurred during AI selector detection.');
+    } finally { setAutoDetectSelectorLoading(false); }
   };
 
   const handleAutoFieldDetect = async () => {
     setError('');
     const iframeDoc = iframeRef.current?.contentDocument;
     const containerSelector = convertToSelector(container.tag, container.attrs);
-
-    if (!iframeDoc || !containerSelector) {
-        setError('Could not find HTML preview or container selector.');
-        return;
-    }
-
+    if (!iframeDoc || !containerSelector) { setError('Could not find HTML preview or container selector.'); return; }
     const firstContainer = iframeDoc.querySelector(containerSelector);
-    if (!firstContainer) {
-        setError('Could not find a container element in the preview to analyze.');
-        return;
-    }
-
+    if (!firstContainer) { setError('Could not find a container element in the preview to analyze.'); return; }
     setAutoFieldDetectLoading(true);
     try {
       const ai = new GoogleGenAI({ apiKey: apiKey });
@@ -407,59 +610,22 @@ const App: React.FC = () => {
       Return ONLY a JSON array of objects, where each object has "name", "tag", and "attrs" keys.
       Example: [{ "name": "product_title", "tag": "h2", "attrs": "class=title" }, { "name": "price", "tag": "span", "attrs": "class=price" }]`;
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: prompt,
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-                type: Type.ARRAY,
-                items: {
-                    type: Type.OBJECT,
-                    properties: {
-                        name: { type: Type.STRING },
-                        tag: { type: Type.STRING },
-                        attrs: { type: Type.STRING },
-                    },
-                    required: ['name', 'tag', 'attrs']
-                }
-            }
-        }
-      });
-      
+      const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: "application/json", responseSchema: { type: Type.ARRAY, items: { type: Type.OBJECT, properties: { name: { type: Type.STRING }, tag: { type: Type.STRING }, attrs: { type: Type.STRING } }, required: ['name', 'tag', 'attrs'] } } } });
       const jsonStr = response.text.trim();
       const suggestedFields = JSON.parse(jsonStr);
-
       if (Array.isArray(suggestedFields) && suggestedFields.length > 0) {
-        const newExtractors = suggestedFields.map(field => ({
-          id: Date.now() + Math.random(),
-          name: field.name || 'unnamed_field',
-          tag: field.tag || '',
-          attrs: field.attrs || '',
-        }));
+        const newExtractors = suggestedFields.map(field => ({ id: Date.now() + Math.random(), name: field.name || 'unnamed_field', tag: field.tag || '', attrs: field.attrs || '' }));
         setExtractors(newExtractors);
-      } else {
-        setError('AI could not find any fields to extract. Please add them manually.');
-        setExtractors([]); // Clear any existing
-      }
-      setExtractionMethod('manual'); // Show the populated list for editing
-
-    } catch (e) {
-      console.error('Error auto-detecting fields with AI:', e);
-      setError('An error occurred during AI field detection. Please try adding fields manually.');
-    } finally {
-      setAutoFieldDetectLoading(false);
-    }
+      } else { setError('AI could not find any fields to extract. Please add them manually.'); setExtractors([]); }
+      setExtractionMethod('manual');
+    } catch (e) { console.error('Error auto-detecting fields with AI:', e); setError('An error occurred during AI field detection. Please try adding fields manually.');
+    } finally { setAutoFieldDetectLoading(false); }
   };
-
 
   const handleMultiPageModeChange = (mode: MultiPageMode) => {
     setMultiPageMode(mode);
     setError('');
-    // Reset state to avoid confusion
-    if (mode === 'button') {
-        setUrl(''); 
-    }
+    if (mode === 'button') setUrl(''); 
     setUrlPrefix('');
     setUrlSuffix('');
   };
@@ -468,21 +634,8 @@ const App: React.FC = () => {
     const iframe = iframeRef.current;
     const iframeDoc = iframe?.contentDocument;
     if (!iframeDoc || selectingFor === null) return;
-
-    const handleMouseOver = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target) {
-        target.style.outline = '2px solid #6366f1';
-        target.style.cursor = 'pointer';
-      }
-    };
-    const handleMouseOut = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (target) {
-        target.style.outline = '';
-        target.style.cursor = '';
-      }
-    };
+    const handleMouseOver = (e: MouseEvent) => { (e.target as HTMLElement).style.outline = '2px solid #6366f1'; (e.target as HTMLElement).style.cursor = 'pointer'; };
+    const handleMouseOut = (e: MouseEvent) => { (e.target as HTMLElement).style.outline = ''; (e.target as HTMLElement).style.cursor = ''; };
     const handleClick = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
@@ -492,7 +645,6 @@ const App: React.FC = () => {
         const originalBg = target.style.backgroundColor;
         target.style.backgroundColor = '#d1fae5';
         setTimeout(() => { target.style.backgroundColor = originalBg; }, 300);
-
         const { tag, attrs } = generateExtractorDetails(target);
         if (selectingFor === 'container') {
           handleContainerChange('tag', tag);
@@ -506,11 +658,9 @@ const App: React.FC = () => {
         setSelectingFor(null);
       }
     };
-
     iframeDoc.addEventListener('mouseover', handleMouseOver);
     iframeDoc.addEventListener('mouseout', handleMouseOut);
     iframeDoc.addEventListener('click', handleClick, true);
-
     return () => {
       iframeDoc.removeEventListener('mouseover', handleMouseOver);
       iframeDoc.removeEventListener('mouseout', handleMouseOut);
@@ -519,334 +669,249 @@ const App: React.FC = () => {
   }, [selectingFor, handleExtractorChange, handleContainerChange, handleTest]);
   
   useEffect(() => {
-    if (step === 5) {
+    // Determine if we are on the final step for any flow
+    const isDynamicFinal = scrapingType === 'dynamic' && step === (useProxy ? 6 : 5);
+    const isStaticUrlFinal = scrapingType === 'static' && staticSource === 'url' && step === (useProxy ? 4 : 3);
+    const isStaticFileFinal = scrapingType === 'static' && staticSource === 'file' && step === 3;
+        
+    if (isDynamicFinal || isStaticUrlFinal || isStaticFileFinal) {
       const code = generateBeautifulSoupCode({ 
-          projectName, 
-          scrapingMode, 
-          container, 
-          extractors, 
-          outputFormat,
-          scrapingScope,
-          startPage,
-          numPages,
+        projectName, 
+        scrapingMode, 
+        container, 
+        extractors, 
+        outputFormat,
+        source: (scrapingType === 'static' && staticSource === 'url') ? 'live-url' : 'local-files',
+        // --- URL-specific params ---
+        url: scrapingScope === 'single' ? url : '',
+        urlPrefix: scrapingScope === 'multi' ? urlPrefix : '',
+        urlSuffix: scrapingScope === 'multi' ? urlSuffix : '',
+        proxyList: useProxy ? proxyList : '',
+        delay,
+        browser,
       });
       setBsCode(code);
     }
-  }, [outputFormat, step, extractors, container, scrapingMode, projectName, scrapingScope, startPage, numPages]);
+  }, [outputFormat, step, extractors, container, scrapingMode, projectName, scrapingScope, startPage, numPages, scrapingType, useProxy, url, urlPrefix, urlSuffix, proxyList, delay, browser, staticSource]);
 
+  let steps: string[] = [];
+  if (scrapingType === 'dynamic') {
+      steps = ["Configure", "Run Selenium", "Upload Sample", "Define Extractors", "Get Scraper"];
+      if (useProxy) { steps.splice(1, 0, "Configure Proxies"); }
+  } else if (scrapingType === 'static') {
+      if (staticSource === 'url') {
+        steps = ["Configure", "Define Extractors", "Get Scraper"];
+        if (useProxy) { steps.splice(1, 0, "Configure Proxies"); }
+      } else if (staticSource === 'file') {
+        steps = ["Upload HTML", "Define Extractors", "Get Scraper"];
+      }
+  }
 
-  const renderStep = () => {
-    switch (step) {
-      case 1:
-        return (
-          <div>
-            <h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Configure Scraper</h2>
-            <p className="text-gray-600 mb-4">Choose how to provide the HTML content for scraping.</p>
-            <div className="flex border-b border-gray-200 mb-4">
-              <button onClick={() => setStartMethod('url')} className={`px-4 py-2 text-sm font-medium transition-colors ${startMethod === 'url' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}>Start with a URL</button>
-              <button onClick={() => setStartMethod('file')} className={`px-4 py-2 text-sm font-medium transition-colors ${startMethod === 'file' ? 'border-b-2 border-indigo-600 text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}>Start with an HTML File</button>
-            </div>
-            {startMethod === 'url' ? (
-              <div className="space-y-4">
-                <p className="text-sm text-gray-600">Provide a URL to generate a Python Selenium script that will download the page's HTML.</p>
-                <div>
-                    <label htmlFor="project-name" className="block text-sm font-medium text-gray-700">Project Folder Name</label>
-                    <input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_web_scraper" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" />
-                    <p className="text-xs text-gray-500 mt-1">All generated files (HTML, CSV, etc.) will be saved in this folder.</p>
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-2">Scraping Scope</label>
-                  <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-colors ${scrapingScope === 'single' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                      <span className="font-semibold text-gray-900">Single Page</span>
-                      <span className="text-sm text-gray-500 mt-1">Scrape content from a single URL.</span>
-                      <input type="radio" name="scraping-scope" value="single" checked={scrapingScope === 'single'} onChange={() => setScrapingScope('single')} className="absolute h-full w-full opacity-0 cursor-pointer" />
-                    </label>
-                    <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-colors ${scrapingScope === 'multi' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                      <span className="font-semibold text-gray-900">Multiple Pages</span>
-                      <span className="text-sm text-gray-500 mt-1">Scrape across multiple pages using pagination.</span>
-                      <input type="radio" name="scraping-scope" value="multi" checked={scrapingScope === 'multi'} onChange={() => setScrapingScope('multi')} className="absolute h-full w-full opacity-0 cursor-pointer" />
-                    </label>
-                  </fieldset>
-                </div>
-                {scrapingScope === 'multi' && (
-                  <div className="p-4 border border-indigo-200 bg-indigo-50 rounded-lg space-y-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-2">Pagination Method</label>
-                      <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                        <label className={`relative flex items-center p-3 border rounded-lg cursor-pointer transition-colors text-sm ${multiPageMode === 'button' ? 'border-indigo-600 bg-white ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                          <input type="radio" name="multi-page-mode" value="button" checked={multiPageMode === 'button'} onChange={() => handleMultiPageModeChange('button')} className="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" />
-                          <span className="ml-3 font-medium text-gray-900">Click 'Next' Button</span>
-                        </label>
-                        <label className={`relative flex items-center p-3 border rounded-lg cursor-pointer transition-colors text-sm ${multiPageMode === 'url' ? 'border-indigo-600 bg-white ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                           <input type="radio" name="multi-page-mode" value="url" checked={multiPageMode === 'url'} onChange={() => handleMultiPageModeChange('url')} className="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" />
-                          <span className="ml-3 font-medium text-gray-900">URL Pattern</span>
-                        </label>
-                      </fieldset>
-                    </div>
-
-                    <div>
-                      <label htmlFor="start-page" className="block text-sm font-medium text-gray-700">Start Page Number</label>
-                      <input id="start-page" type="number" value={startPage} onChange={(e) => setStartPage(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" />
-                      <p className="text-xs text-gray-500 mt-1">The number to start counting pages from (used for file names and URL pattern).</p>
-                    </div>
-                    <div>
-                      <label htmlFor="num-pages" className="block text-sm font-medium text-gray-700">Total Number of Pages to Scrape</label>
-                      <input id="num-pages" type="number" value={numPages} onChange={(e) => setNumPages(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" max="100" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" />
-                      <p className="text-xs text-gray-500 mt-1">The total count of pages you want to scrape.</p>
-                    </div>
-                     {multiPageMode === 'button' ? (
-                        <div>
-                        <label htmlFor="next-selector" className="block text-sm font-medium text-gray-700">"Next Page" Button CSS Selector</label>
-                        <input id="next-selector" type="text" value={nextPageSelector} onChange={(e) => setNextPageSelector(e.target.value)} placeholder="e.g., li.next > a" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:ring-2 focus:ring-indigo-500" />
-                        <p className="text-xs text-gray-500 mt-1">This is the CSS selector for the link that takes you to the next page.</p>
-                        </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div>
-                          <label htmlFor="url-pattern-input" className="block text-sm font-medium text-gray-700">Example URL (from page 2 or higher)</label>
-                          <div className="flex items-center gap-2 mt-1">
-                            <input id="url-pattern-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/products?page=2" className="flex-grow px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" />
-                            <button onClick={handleAutoDetectPattern} disabled={autoDetectLoading} className="px-3 py-2 bg-indigo-100 text-indigo-700 font-semibold rounded-md hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200 disabled:text-gray-500 disabled:cursor-wait flex items-center">
-                              {autoDetectLoading ? (
-                                <>
-                                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-indigo-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                                  Detecting...
-                                </>
-                              ) : "✨ Auto-detect Pattern"}
-                            </button>
-                          </div>
-                        </div>
-                        <div>
-                          <label htmlFor="url-prefix" className="block text-sm font-medium text-gray-700">URL Prefix</label>
-                          <input id="url-prefix" type="text" value={urlPrefix} onChange={(e) => setUrlPrefix(e.target.value)} placeholder="https://example.com/page=" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:ring-2 focus:ring-indigo-500" />
-                        </div>
-                         <div>
-                          <label htmlFor="url-suffix" className="block text-sm font-medium text-gray-700">URL Suffix (optional)</label>
-                          <input id="url-suffix" type="text" value={urlSuffix} onChange={(e) => setUrlSuffix(e.target.value)} placeholder=".html" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm focus:ring-2 focus:ring-indigo-500" />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                )}
-                
-                { (scrapingScope === 'single' || multiPageMode === 'button') && (
-                    <div>
-                    <label htmlFor="url-input" className="block text-sm font-medium text-gray-700">
-                        Website URL
-                    </label>
-                    <input id="url-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} 
-                        placeholder="https://example.com"
-                        className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition" aria-describedby="url-example" />
-                    <p id="url-example" className="text-xs text-gray-500 mt-1">e.g., <button onClick={() => setUrl('https://quotes.toscrape.com/js/')} className="text-indigo-600 hover:text-indigo-800 underline focus:outline-none focus:ring-2 focus:ring-indigo-500 rounded">https://quotes.toscrape.com/js/</button></p>
-                    </div>
-                )}
-
-                {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                <button onClick={handleUrlSubmit} className="mt-4 w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">Generate Selenium Code</button>
-              </div>
-            ) : (
-              <div>
-                <p className="text-sm text-gray-600 mb-4">Upload your HTML file to start defining your extractors.</p>
-                <div className="mt-4 flex justify-center rounded-lg border border-dashed border-gray-900/25 px-6 py-10">
-                  <div className="text-center">
-                    <svg className="mx-auto h-12 w-12 text-gray-400" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M1.5 6a2.25 2.25 0 012.25-2.25h16.5A2.25 2.25 0 0122.5 6v12a2.25 2.25 0 01-2.25 2.25H3.75A2.25 2.25 0 011.5 18V6zM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0021 18v-1.94l-2.69-2.689a1.5 1.5 0 00-2.12 0l-.88.879.97.97a.75.75 0 11-1.06 1.06l-5.16-5.159a1.5 1.5 0 00-2.12 0L3 16.061zm10.125-7.81a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0z" clipRule="evenodd" /></svg>
-                    <div className="mt-4 flex text-sm leading-6 text-gray-600">
-                      <label htmlFor="file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-indigo-600 focus-within:ring-offset-2 hover:text-indigo-500">
-                        <span>Upload a file</span>
-                        <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} />
-                      </label>
-                      <p className="pl-1">or drag and drop</p>
-                    </div>
-                    <p className="text-xs leading-5 text-gray-600">HTML file up to 10MB</p>
-                  </div>
-                </div>
-                {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-              </div>
-            )}
-          </div>
-        );
-      case 2:
-        return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 2: Run Selenium Script</h2><p className="text-gray-600 mb-4">Run this Python script on your local machine. It will create a folder named <span className="font-mono bg-gray-200 px-1 rounded">{projectName}</span> and save the page HTML to <span className="font-mono bg-gray-200 px-1 rounded">{scrapingScope === 'single' ? 'dataset.html' : `dataset_${startPage}.html, dataset_${startPage + 1}.html, etc.`}</span> inside it.</p><CodeBlock code={seleniumCode} language="python" /><div className="mt-4 flex flex-col sm:flex-row gap-2"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors">Back</button><button onClick={() => setStep(3)} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors">Next: Upload Sample HTML</button></div></div>);
-      case 3:
-        return (
-            <div>
-                <h2 className="text-xl font-semibold text-gray-800 mb-2">Step 3: Upload Sample HTML File</h2>
-                <p className="text-gray-600 mb-4">Upload one of the generated HTML files (e.g., `dataset_{startPage}.html`) to use as a sample for defining extractors.</p>
-                
-                <div className="mt-4 flex justify-center rounded-lg border border-dashed border-gray-900/25 px-6 py-10">
-                    <div className="text-center">
-                        <svg className="mx-auto h-12 w-12 text-gray-400" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path fillRule="evenodd" d="M1.5 6a2.25 2.25 0 012.25-2.25h16.5A2.25 2.25 0 0122.5 6v12a2.25 2.25 0 01-2.25 2.25H3.75A2.25 2.25 0 011.5 18V6zM3 16.06V18c0 .414.336.75.75.75h16.5A.75.75 0 0021 18v-1.94l-2.69-2.689a1.5 1.5 0 00-2.12 0l-.88.879.97.97a.75.75 0 11-1.06 1.06l-5.16-5.159a1.5 1.5 0 00-2.12 0L3 16.061zm10.125-7.81a1.125 1.125 0 112.25 0 1.125 1.125 0 01-2.25 0z" clipRule="evenodd" /></svg>
-                        <div className="mt-4 flex text-sm leading-6 text-gray-600">
-                            <label htmlFor="file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-indigo-600 focus-within:ring-offset-2 hover:text-indigo-500">
-                                <span>Upload a file</span>
-                                <input id="file-upload" name="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} />
-                            </label>
-                            <p className="pl-1">or drag and drop</p>
-                        </div>
-                        <p className="text-xs leading-5 text-gray-600">A single HTML file up to 10MB</p>
-                    </div>
-                </div>
-
-                {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-                
-                <div className="mt-6 flex flex-col sm:flex-row gap-2">
-                    <button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors">Back</button>
-                    <button 
-                        onClick={() => setStep(4)}
-                        className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors disabled:bg-indigo-300 disabled:cursor-not-allowed"
-                        disabled={htmlContents.length === 0}
-                    >
-                        Next: Define Extractors
-                    </button>
-                </div>
-            </div>
-        );
-      case 4:
-        const singleExtractor = extractors[0];
-        const singleTestResult = testResults[singleExtractor.id];
-        return (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[75vh]">
-            <div className="flex flex-col"><h2 className="text-xl font-semibold text-gray-800 mb-2">HTML Preview</h2><p className="text-gray-600 mb-4 text-sm">Preview of your sample file: <span className="font-semibold">{htmlContents[0]?.name}</span></p><div className="flex-grow border border-gray-300 rounded-md overflow-hidden relative">{selectingFor !== null && ( <div className="absolute inset-x-0 top-0 bg-indigo-600 text-white text-center text-sm py-1 z-10 animate-pulse">Selection Mode Active: Click an element in the preview.</div> )}<iframe ref={iframeRef} srcDoc={htmlContents[0]?.content || ''} title="HTML Preview" className="w-full h-full" sandbox="allow-same-origin"/></div></div>
-            <div className="flex flex-col"><div className="space-y-6 flex-grow overflow-y-auto pr-2">
-              <div>
-                <h3 className="text-lg font-semibold text-gray-800">Step 4: Define What to Extract</h3>
-                <p className="text-sm text-gray-600 mb-4">First, choose your scraping goal.</p>
-                <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-colors ${scrapingMode === 'structured' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                    <span className="font-semibold text-gray-900">Extract Structured Data</span>
-                    <span className="text-sm text-gray-500 mt-1">Scrape multiple fields from repeating items (e.g., name and price from product cards).</span>
-                    <input type="radio" name="scraping-mode" value="structured" checked={scrapingMode === 'structured'} onChange={() => handleModeChange('structured')} className="absolute h-full w-full opacity-0 cursor-pointer" />
-                  </label>
-                  <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-colors ${scrapingMode === 'simple' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}>
-                    <span className="font-semibold text-gray-900">Extract a Simple List</span>
-                    <span className="text-sm text-gray-500 mt-1">Scrape a single list of all matching items on the page (e.g., all links).</span>
-                    <input type="radio" name="scraping-mode" value="simple" checked={scrapingMode === 'simple'} onChange={() => handleModeChange('simple')} className="absolute h-full w-full opacity-0 cursor-pointer" />
-                  </label>
-                </fieldset>
-              </div>
-
-              {scrapingMode === 'structured' ? (
-                <>
-                  <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Container</h3><p className="text-xs text-gray-500 mb-2">Find the repeating element that holds all the info for one item (e.g., a product card).</p><div className="p-3 bg-gray-50 border border-gray-200 rounded-lg space-y-2"><div className="flex items-center gap-2"><input type="text" value={container.tag} onChange={(e) => handleContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(selectingFor === 'container' ? null : 'container')} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === 'container' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select container element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('container', 0, container.tag, container.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test container"><PlayIcon /></button></div><textarea value={container.attrs} onChange={(e) => handleContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=quote)" rows={1} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
-                  {containerTestResult && (<div className={`p-2 text-xs rounded border ${containerTestResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}><p className="font-semibold">{containerTestResult.preview}</p></div>)}</div></div>
-                  
-                  {isContainerSet && extractionMethod === null && (
-                    <div className="mt-4 p-4 border-2 border-dashed border-indigo-200 bg-indigo-50 rounded-lg">
-                        <h3 className="text-base font-semibold text-gray-800">Define Fields to Extract</h3>
-                        <p className="text-xs text-gray-500 mb-3">Now, define the data you want from inside each container.</p>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                            <button onClick={handleAutoFieldDetect} disabled={autoFieldDetectLoading} className="w-full px-3 py-2 bg-indigo-100 text-indigo-700 font-semibold rounded-md hover:bg-indigo-200 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:bg-gray-200 disabled:text-gray-500 disabled:cursor-wait flex items-center justify-center">
-                               {autoFieldDetectLoading ? (
-                                <>
-                                  <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-indigo-700" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
-                                  Detecting...
-                                </>
-                              ) : "✨ Auto-detect Fields"}
-                            </button>
-                            <button onClick={() => setExtractionMethod('manual')} className="w-full px-3 py-2 bg-white text-gray-700 font-semibold rounded-md border border-gray-300 hover:bg-gray-100 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
-                                Add Fields Manually
-                            </button>
-                        </div>
-                    </div>
-                  )}
-
-                  {isContainerSet && extractionMethod === 'manual' && (
-                    <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Fields to Extract</h3><p className="text-xs text-gray-500 mb-2">Define the data you want from inside each container.</p>
-                      <div className="space-y-4">{extractors.map((extractor, index) => {const testResult = testResults[extractor.id];return (<div key={extractor.id} className="p-4 bg-gray-50 border border-gray-200 rounded-lg"><div className="flex justify-between items-center mb-2"><label className="block text-sm font-medium text-gray-700">Field #{index + 1}</label><button onClick={() => handleRemoveExtractor(extractor.id)} disabled={extractors.length <= 1} className="text-gray-400 hover:text-red-600 disabled:text-gray-300 disabled:cursor-not-allowed transition-colors" aria-label="Remove extractor"><TrashIcon /></button></div><div className="grid grid-cols-1 gap-4"><input type="text" value={extractor.name} onChange={(e) => handleExtractorChange(extractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name (e.g., quote_text)" className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" /><div className="flex items-center gap-2"><input type="text" value={extractor.tag} onChange={(e) => handleExtractorChange(extractor.id, 'tag', e.target.value)} placeholder="HTML Tag (e.g., span)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(extractor.id === selectingFor ? null : extractor.id)} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === extractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select element from preview"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', extractor.id, extractor.tag, extractor.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test this field"><PlayIcon /></button></div><textarea value={extractor.attrs} onChange={(e) => handleExtractorChange(extractor.id, 'attrs', e.target.value)} placeholder="Attributes (e.g., class=text)" rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
-                      {testResult && (<div className={`mt-2 p-2 text-xs rounded border ${testResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}><p className="font-semibold">{testResult.preview}</p></div>)}</div></div>);})}</div>
-                      <button onClick={handleAddExtractor} className="mt-4 flex items-center justify-center w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors"><PlusIcon />Add Field</button>
-                    </div>
-                  )}
-                </>
-              ) : ( // Simple Mode
-                <div><h3 className="text-base font-semibold text-gray-800 mt-4">Define Field to Extract</h3><p className="text-xs text-gray-500 mb-2">Define the single element you want to extract from the entire page.</p>
-                <div className="p-4 bg-gray-50 border border-gray-200 rounded-lg">
-                    <div className="grid grid-cols-1 gap-4">
-                        <input type="text" value={singleExtractor.name} onChange={(e) => handleExtractorChange(singleExtractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name (e.g., all_links)" className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm" />
-                        <div className="flex items-center gap-2">
-                            <input type="text" value={singleExtractor.tag} onChange={(e) => handleExtractorChange(singleExtractor.id, 'tag', e.target.value)} placeholder="HTML Tag (e.g., a)" className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
-                            <button onClick={() => setSelectingFor(singleExtractor.id === selectingFor ? null : singleExtractor.id)} className={`p-2 rounded-md transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${selectingFor === singleExtractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-700 hover:bg-gray-300'}`} title="Select element from preview"><CursorArrowRaysIcon /></button>
-                            <button onClick={() => handleTest('extractor', singleExtractor.id, singleExtractor.tag, singleExtractor.attrs)} className="p-2 rounded-md bg-green-100 text-green-800 hover:bg-green-200 transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500" title="Test this field"><PlayIcon /></button>
-                        </div>
-                        <textarea value={singleExtractor.attrs} onChange={(e) => handleExtractorChange(singleExtractor.id, 'attrs', e.target.value)} placeholder="Attributes (e.g., class=link)" rows={2} className="w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" />
-                        {singleTestResult && (
-                            <div className={`mt-2 p-2 text-xs rounded border ${singleTestResult.error ? 'bg-red-50 border-red-200 text-red-800' : 'bg-green-50 border-green-200 text-green-800'}`}>
-                                <p className="font-semibold">{singleTestResult.preview}</p>
-                            </div>
-                        )}
-                    </div>
-                </div>
-                </div>
-              )}
-              </div>
-              {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-              <div className="mt-2 flex flex-col sm:flex-row gap-2 pt-2 border-t"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors">Back</button><button onClick={handleGenerateBsCode} disabled={(scrapingMode === 'structured' && !isContainerSet) || htmlContents.length === 0} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors disabled:bg-indigo-300 disabled:cursor-not-allowed" title={(scrapingMode === 'structured' && !isContainerSet) ? 'You must define and test a container first' : ''}>Generate BeautifulSoup Code</button></div>
-            </div>
-          </div>
-        );
-      case 5:
-        return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 5: Final BeautifulSoup Script</h2><p className="text-gray-600 mb-4">Run this script in the parent directory of your <span className="font-mono bg-gray-200 px-1 rounded">{projectName}</span> folder to extract the data.</p><div className="mb-4"><label className="block text-sm font-medium text-gray-700 mb-2">Output Format:</label><div className="flex items-center space-x-4">{(['csv', 'json', 'print'] as OutputFormat[]).map((format) => (<label key={format} className="flex items-center"><input type="radio" name="output-format" value={format} checked={outputFormat === format} onChange={() => setOutputFormat(format)} className="h-4 w-4 text-indigo-600 border-gray-300 focus:ring-indigo-500" /><span className="ml-2 text-sm text-gray-700 capitalize">{format === 'print' ? 'Print to Console' : format.toUpperCase()}</span></label>))}</div></div><CodeBlock code={bsCode} language="python" /><div className="mt-4 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleStartOver} className="w-full bg-gray-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-gray-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-500 transition-colors flex items-center justify-center gap-2"><ArrowPathIcon />Start Over</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-gray-400 transition-colors">Back</button></div></div>);
-      default:
-        return <div>Invalid Step</div>;
-    }
-  };
-
-  if (!apiKey) {
+  const renderExtractorUI = (currentStep: number) => {
+    const singleExtractor = extractors[0];
+    const singleTestResult = testResults[singleExtractor.id];
     return (
-      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
-        <div className="w-full max-w-md">
-          <div className="bg-white rounded-xl shadow-lg p-8">
-            <h1 className="text-2xl font-bold text-gray-900 text-center">Welcome to the Python Scraper Studio</h1>
-            <p className="text-gray-600 mt-2 text-center">To use the AI-powered features, please enter your Google AI API Key.</p>
-            <div className="mt-6">
-              <label htmlFor="api-key-input" className="block text-sm font-medium text-gray-700">
-                Google AI API Key
-              </label>
-              <input
-                id="api-key-input"
-                type="password"
-                value={apiKeyInput}
-                onChange={(e) => setApiKeyInput(e.target.value)}
-                placeholder="Enter your API key here"
-                className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition"
-              />
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[75vh]">
+            <div className="flex flex-col"><h2 className="text-xl font-semibold text-gray-800 mb-2">HTML Preview</h2><div className="flex-grow border border-gray-300 rounded-md overflow-hidden relative">{selectingFor !== null && ( <div className="absolute inset-x-0 top-0 bg-indigo-600 text-white text-center text-sm py-1 z-10 animate-pulse">Selection Mode Active</div> )}<iframe ref={iframeRef} srcDoc={htmlContents[0]?.content || ''} title="HTML Preview" className="w-full h-full" sandbox="allow-same-origin"/></div></div>
+            <div className="flex flex-col"><div className="space-y-6 flex-grow overflow-y-auto pr-2">
+            <div><h3 className="text-lg font-semibold text-gray-800">Step {currentStep}: Define What to Extract</h3><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingMode === 'structured' ? 'border-indigo-600 bg-indigo-50 ring-2' : 'hover:bg-gray-50'}`}><span className="font-semibold">Extract Structured Data</span><span className="text-sm text-gray-500 mt-1">Multiple fields from repeating items.</span><input type="radio" name="scraping-mode" value="structured" checked={scrapingMode === 'structured'} onChange={() => handleModeChange('structured')} className="absolute h-full w-full opacity-0" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingMode === 'simple' ? 'border-indigo-600 bg-indigo-50 ring-2' : 'hover:bg-gray-50'}`}><span className="font-semibold">Extract a Simple List</span><span className="text-sm text-gray-500 mt-1">A single list of all matching items.</span><input type="radio" name="scraping-mode" value="simple" checked={scrapingMode === 'simple'} onChange={() => handleModeChange('simple')} className="absolute h-full w-full opacity-0" /></label></fieldset></div>
+            {scrapingMode === 'structured' ? (<>
+                <div><h3 className="text-base font-semibold">Define Container</h3><div className="p-3 bg-gray-50 border rounded-lg space-y-2"><div className="flex items-center gap-2"><input type="text" value={container.tag} onChange={(e) => handleContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(selectingFor === 'container' ? null : 'container')} className={`p-2 rounded-md ${selectingFor === 'container' ? 'bg-indigo-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`} title="Select container"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('container', 0, container.tag, container.attrs)} className="p-2 rounded-md bg-green-100 hover:bg-green-200" title="Test container"><PlayIcon /></button></div><textarea value={container.attrs} onChange={(e) => handleContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=quote)" rows={1} className="w-full px-3 py-2 border rounded-md font-mono text-sm" />
+                {containerTestResult && (<div className={`p-2 text-xs rounded border ${containerTestResult.error ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}><p>{containerTestResult.preview}</p></div>)}</div></div>
+                {isContainerSet && extractionMethod === null && (<div className="p-4 border-2 border-dashed bg-indigo-50 rounded-lg"><h3 className="text-base font-semibold">Define Fields to Extract</h3><div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3"><button onClick={handleAutoFieldDetect} disabled={autoFieldDetectLoading} className="w-full px-3 py-2 bg-indigo-100 font-semibold rounded-md hover:bg-indigo-200 disabled:bg-gray-200 disabled:cursor-wait flex items-center justify-center">{autoFieldDetectLoading ? 'Detecting...' : "✨ Auto-detect Fields"}</button><button onClick={() => setExtractionMethod('manual')} className="w-full px-3 py-2 bg-white font-semibold rounded-md border hover:bg-gray-100">Add Fields Manually</button></div></div>)}
+                {isContainerSet && extractionMethod === 'manual' && (<div><h3 className="text-base font-semibold">Define Fields to Extract</h3><div className="space-y-4">{extractors.map((extractor, index) => {const testResult = testResults[extractor.id];return (<div key={extractor.id} className="p-4 bg-gray-50 border rounded-lg"><div className="flex justify-between items-center mb-2"><label className="block text-sm font-medium">Field #{index + 1}</label><button onClick={() => handleRemoveExtractor(extractor.id)} disabled={extractors.length <= 1} className="text-gray-400 hover:text-red-600 disabled:text-gray-300" aria-label="Remove"><TrashIcon /></button></div><div className="grid grid-cols-1 gap-4"><input type="text" value={extractor.name} onChange={(e) => handleExtractorChange(extractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name" className="w-full px-3 py-2 border rounded-md text-sm" /><div className="flex items-center gap-2"><input type="text" value={extractor.tag} onChange={(e) => handleExtractorChange(extractor.id, 'tag', e.target.value)} placeholder="HTML Tag" className="w-full px-3 py-2 border rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(extractor.id === selectingFor ? null : extractor.id)} className={`p-2 rounded-md ${selectingFor === extractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`} title="Select element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', extractor.id, extractor.tag, extractor.attrs)} className="p-2 rounded-md bg-green-100 hover:bg-green-200" title="Test field"><PlayIcon /></button></div><textarea value={extractor.attrs} onChange={(e) => handleExtractorChange(extractor.id, 'attrs', e.target.value)} placeholder="Attributes" rows={2} className="w-full px-3 py-2 border rounded-md font-mono text-sm" />
+                {testResult && (<div className={`mt-2 p-2 text-xs rounded border ${testResult.error ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}><p>{testResult.preview}</p></div>)}</div></div>);})}</div><button onClick={handleAddExtractor} className="mt-4 flex items-center justify-center w-full bg-gray-200 font-semibold py-2 px-4 rounded-md hover:bg-gray-300"><PlusIcon />Add Field</button></div>)}</>
+            ) : (
+                <div><h3 className="text-base font-semibold">Define Field to Extract</h3><div className="p-4 bg-gray-50 border rounded-lg"><div className="grid grid-cols-1 gap-4"><input type="text" value={singleExtractor.name} onChange={(e) => handleExtractorChange(singleExtractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name" className="w-full px-3 py-2 border rounded-md text-sm" /><div className="flex items-center gap-2"><input type="text" value={singleExtractor.tag} onChange={(e) => handleExtractorChange(singleExtractor.id, 'tag', e.target.value)} placeholder="HTML Tag" className="w-full px-3 py-2 border rounded-md font-mono text-sm" /><button onClick={() => setSelectingFor(singleExtractor.id === selectingFor ? null : singleExtractor.id)} className={`p-2 rounded-md ${selectingFor === singleExtractor.id ? 'bg-indigo-600 text-white' : 'bg-gray-200 hover:bg-gray-300'}`} title="Select element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', singleExtractor.id, singleExtractor.tag, singleExtractor.attrs)} className="p-2 rounded-md bg-green-100 hover:bg-green-200" title="Test field"><PlayIcon /></button></div><textarea value={singleExtractor.attrs} onChange={(e) => handleExtractorChange(singleExtractor.id, 'attrs', e.target.value)} placeholder="Attributes" rows={2} className="w-full px-3 py-2 border rounded-md font-mono text-sm" />
+                {singleTestResult && (<div className={`mt-2 p-2 text-xs rounded border ${singleTestResult.error ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}><p>{singleTestResult.preview}</p></div>)}</div></div></div>
+            )}
             </div>
             {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
-            <button
-              onClick={handleApiKeySubmit}
-              className="mt-6 w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors"
-            >
-              Continue
-            </button>
-             <p className="text-xs text-gray-500 mt-4 text-center">
-                You can get a key from {' '}
-                <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">
-                    Google AI Studio
-                </a>.
-            </p>
-          </div>
+            <div className="mt-2 flex flex-col sm:flex-row gap-2 pt-2 border-t"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button><button onClick={handleGenerateBsCode} disabled={(scrapingMode === 'structured' && !isContainerSet) || htmlContents.length === 0} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 disabled:bg-indigo-300" title={(scrapingMode === 'structured' && !isContainerSet) ? 'Define and test a container first' : ''}>Generate Scraper Code</button></div>
+            </div>
         </div>
-      </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-5xl">
-        <header className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-900">Python Scraper Studio</h1>
-          <p className="text-lg text-gray-600 mt-2">Generate web scraping scripts in a few easy steps.</p>
-        </header>
-        <div className="mb-8">
-          <StepIndicator currentStep={step} />
+  const renderAppContent = () => {
+    if (!scrapingType) {
+        return (
+            <div>
+                <h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Choose Scraping Method</h2>
+                <p className="text-gray-600 mb-6">Select the best method for your target website.</p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <button onClick={() => setScrapingType('dynamic')} className="p-6 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition-all transform hover:scale-105"><h3 className="text-lg font-bold text-gray-900">Dynamic Web Scraping</h3><p className="text-sm text-gray-600 mt-2">Best for modern websites that use JavaScript to load content. Uses Selenium to control a real browser.</p></button>
+                    <button onClick={() => setScrapingType('static')} className="p-6 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition-all transform hover:scale-105"><h3 className="text-lg font-bold text-gray-900">Static Web Scraping</h3><p className="text-sm text-gray-600 mt-2">Best for simple websites. Uses Requests and BeautifulSoup for fast, direct HTML parsing.</p></button>
+                </div>
+                 <div className="mt-8"><button onClick={handleBack} className="w-full sm:w-auto bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back to Advisor</button></div>
+            </div>
+        )
+    }
+
+    if (scrapingType === 'dynamic') {
+        const seleniumStep = useProxy ? 3 : 2;
+        const uploadStep = useProxy ? 4 : 3;
+        const extractorStep = useProxy ? 5 : 4;
+        const finalStep = useProxy ? 6 : 5;
+
+        if (step === 1) {
+            return (
+              <div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Configure Scraper</h2><p className="text-gray-600 mb-4">Set up the details for your Selenium-based scraper.</p><div className="space-y-4">
+                  <div><label htmlFor="project-name" className="block text-sm font-medium text-gray-700">Project Folder Name</label><input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_web_scraper" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" /><p className="text-xs text-gray-500 mt-1">All generated files (HTML, CSV, etc.) will be saved in this folder.</p></div>
+                  <div><label htmlFor="browser-select" className="block text-sm font-medium text-gray-700">Browser</label><select id="browser-select" value={browser} onChange={(e) => setBrowser(e.target.value as Browser)} className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"><option value="chrome">Chrome (Recommended)</option><option value="firefox">Firefox</option><option value="edge">Microsoft Edge</option><option value="brave">Brave</option><option value="opera">Opera</option></select></div>
+                  <div><label htmlFor="delay-timer" className="block text-sm font-medium text-gray-700">Delay Between Actions (milliseconds)</label><input id="delay-timer" type="number" value={delay} onChange={(e) => setDelay(Math.max(0, parseInt(e.target.value, 10) || 0))} min="0" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" /><p className="text-xs text-gray-500 mt-1">Time to wait for pages to load (e.g., 5000ms = 5s). Increase for slower websites.</p></div>
+                  <div className="mt-4"><label className="flex items-center justify-between p-4 border rounded-lg cursor-pointer"><div><span className="font-semibold text-gray-900">Use Proxies</span><span className="block text-sm mt-1 text-gray-500">Route requests through a list of proxies.</span></div><div className={`relative inline-flex items-center h-6 rounded-full w-11 transition-colors ${useProxy ? 'bg-indigo-600' : 'bg-gray-200'}`}><span className={`inline-block w-4 h-4 transform bg-white rounded-full transition-transform ${useProxy ? 'translate-x-6' : 'translate-x-1'}`} /><input type="checkbox" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} className="absolute w-full h-full opacity-0 cursor-pointer" /></div></label></div>
+                  <div><label className="block text-sm font-medium text-gray-700 mb-2">Scraping Scope</label><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingScope === 'single' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><span className="font-semibold text-gray-900">Single Page</span><span className="text-sm text-gray-500 mt-1">Scrape one URL.</span><input type="radio" name="scraping-scope" value="single" checked={scrapingScope === 'single'} onChange={() => setScrapingScope('single')} className="absolute h-full w-full opacity-0 cursor-pointer" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingScope === 'multi' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><span className="font-semibold text-gray-900">Multiple Pages</span><span className="text-sm text-gray-500 mt-1">Scrape using pagination.</span><input type="radio" name="scraping-scope" value="multi" checked={scrapingScope === 'multi'} onChange={() => setScrapingScope('multi')} className="absolute h-full w-full opacity-0 cursor-pointer" /></label></fieldset></div>
+                  {scrapingScope === 'multi' && (<div className="p-4 border border-indigo-200 bg-indigo-50 rounded-lg space-y-4"><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4"><label className={`relative flex items-center p-3 border rounded-lg cursor-pointer text-sm ${multiPageMode === 'button' ? 'border-indigo-600 bg-white ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><input type="radio" name="multi-page-mode" value="button" checked={multiPageMode === 'button'} onChange={() => handleMultiPageModeChange('button')} className="h-4 w-4 text-indigo-600" /><span className="ml-3 font-medium text-gray-900">Click 'Next' Button</span></label><label className={`relative flex items-center p-3 border rounded-lg cursor-pointer text-sm ${multiPageMode === 'url' ? 'border-indigo-600 bg-white ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><input type="radio" name="multi-page-mode" value="url" checked={multiPageMode === 'url'} onChange={() => handleMultiPageModeChange('url')} className="h-4 w-4 text-indigo-600" /><span className="ml-3 font-medium text-gray-900">URL Pattern</span></label></fieldset><div><label htmlFor="start-page" className="block text-sm font-medium text-gray-700">Start Page Number</label><input id="start-page" type="number" value={startPage} onChange={(e) => setStartPage(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md" /></div><div><label htmlFor="num-pages" className="block text-sm font-medium text-gray-700">Total Pages to Scrape</label><input id="num-pages" type="number" value={numPages} onChange={(e) => setNumPages(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" max="100" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md" /></div>{multiPageMode === 'button' ? (<div className="space-y-3"><div><label htmlFor="start-url-button" className="block text-sm font-medium text-gray-700">Start URL</label><input id="start-url-button" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/page/1" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md" /></div><div><label htmlFor="next-selector" className="block text-sm font-medium text-gray-700">"Next Page" Button CSS Selector</label><input id="next-selector" type="text" value={nextPageSelector} onChange={(e) => setNextPageSelector(e.target.value)} placeholder="e.g., li.next > a" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div><div className="p-3 border-2 border-dashed rounded-lg bg-indigo-50/50"><p className="text-xs text-indigo-800 mb-2">Don't know the selector? Upload the start page's HTML file and let AI find it for you.</p><div className="flex items-center gap-2"><label htmlFor="start-page-html-upload" className="flex-grow text-sm"><span className="cursor-pointer rounded-md bg-white font-semibold text-indigo-600 focus-within:outline-none focus-within:ring-2 focus-within:ring-indigo-600 focus-within:ring-offset-2 hover:text-indigo-500 border border-gray-300 px-3 py-1.5">{startPageHtml ? 'File ready' : 'Upload HTML file'}</span><input id="start-page-html-upload" name="start-page-html-upload" type="file" className="sr-only" accept=".html" onChange={handleStartPageHtmlUpload} /></label><button onClick={handleAutoDetectNextSelector} disabled={autoDetectSelectorLoading || !startPageHtml} className="px-3 py-1.5 bg-indigo-100 text-indigo-700 text-sm font-semibold rounded-md hover:bg-indigo-200 disabled:bg-gray-200 disabled:text-gray-500 disabled:cursor-not-allowed flex items-center">{autoDetectSelectorLoading ? 'Detecting...' : "✨ Auto-detect Selector"}</button></div></div></div>) : (<div className="space-y-3"><div><label htmlFor="url-pattern-input" className="block text-sm font-medium text-gray-700">Example URL (from page 2+)</label><div className="flex items-center gap-2 mt-1"><input id="url-pattern-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/products?page=2" className="flex-grow px-4 py-2 border border-gray-300 rounded-md" /><button onClick={handleAutoDetectUrlPattern} disabled={autoDetectUrlLoading} className="px-3 py-2 bg-indigo-100 text-indigo-700 font-semibold rounded-md hover:bg-indigo-200 disabled:bg-gray-200 disabled:text-gray-500 flex items-center">{autoDetectUrlLoading ? 'Detecting...' : "✨ Auto-detect Pattern"}</button></div></div><div><label htmlFor="url-prefix" className="block text-sm font-medium text-gray-700">URL Prefix</label><input id="url-prefix" type="text" value={urlPrefix} onChange={(e) => setUrlPrefix(e.target.value)} placeholder="https://example.com/page=" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div><div><label htmlFor="url-suffix" className="block text-sm font-medium text-gray-700">URL Suffix (optional)</label><input id="url-suffix" type="text" value={urlSuffix} onChange={(e) => setUrlSuffix(e.target.value)} placeholder=".html" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div></div>)}</div>)}
+                  {scrapingScope === 'single' && (<div><label htmlFor="url-input" className="block text-sm font-medium text-gray-700">Website URL</label><input id="url-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md" /></div>)}
+                  {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                  <div className="mt-6 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleNextFromDynamicConfig} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Continue</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Change Method</button></div></div></div>
+            );
+        } else if (useProxy && step === 2) {
+            return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 2: Configure Proxies</h2><p className="text-gray-600 mb-4">Provide your list of proxies, one per line. Format: `ip:port`</p><div className="space-y-4"><div><label htmlFor="proxy-list" className="block text-sm font-medium text-gray-700">Proxy List</label><textarea id="proxy-list" rows={8} value={proxyList} onChange={(e) => setProxyList(e.target.value)} placeholder="192.168.1.1:8080&#10;192.168.1.2:8080" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div><div className="relative"><div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-300" /></div><div className="relative flex justify-center"><span className="bg-white px-2 text-sm text-gray-500">Or</span></div></div><label htmlFor="proxy-file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 focus-within:outline-none hover:text-indigo-500 text-center block border border-dashed py-4"><span>Upload a .txt file</span><input id="proxy-file-upload" type="file" className="sr-only" accept=".txt" onChange={handleProxyFileChange} /></label>{error && <p className="text-red-500 text-sm mt-2">{error}</p>}</div><div className="mt-6 flex flex-col sm:flex-row gap-2"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button><button onClick={handleGenerateSeleniumWithProxy} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Generate Selenium Code</button></div></div>);
+        } else if (step === seleniumStep) {
+            return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step {seleniumStep}: Run Selenium Script</h2><p className="text-gray-600 mb-4">Run this script locally to create a <span className="font-mono bg-gray-200 p-1 rounded">{projectName}</span> folder and save the page HTML inside it.</p><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={seleniumCode} /><AiCodeDebugger apiKey={apiKey} originalCode={seleniumCode} codeType="Selenium" /></div><div className="mt-4 flex flex-col sm:flex-row gap-2"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button><button onClick={() => setStep(seleniumStep + 1)} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Next: Upload Sample HTML</button></div></div>);
+        } else if (step === uploadStep) {
+            return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step {uploadStep}: Upload Sample HTML File</h2><p className="text-gray-600 mb-4">Upload one of the HTML files your Selenium script generated.</p><div className="mt-4 flex justify-center rounded-lg border border-dashed border-gray-900/25 px-6 py-10"><div className="text-center"><div className="mt-4 flex text-sm leading-6 text-gray-600"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 hover:text-indigo-500"><span>Upload a file</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label><p className="pl-1">or drag and drop</p></div><p className="text-xs leading-5 text-gray-600">A single HTML file up to 10MB</p></div></div>{error && <p className="text-red-500 text-sm mt-2">{error}</p>}<div className="mt-6 flex flex-col sm:flex-row gap-2"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button><button onClick={() => setStep(uploadStep + 1)} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 disabled:bg-indigo-300" disabled={htmlContents.length === 0}>Next: Define Extractors</button></div></div>);
+        } else if (step === extractorStep) {
+            return renderExtractorUI(extractorStep);
+        } else if (step === finalStep) {
+            return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step {finalStep}: Final BeautifulSoup Script</h2><p className="text-gray-600 mb-4">Run this script in the parent directory of your <span className="font-mono bg-gray-200 p-1 rounded">{projectName}</span> folder to extract the data.</p><div className="mb-4"><label className="block text-sm font-medium mb-2">Output Format:</label><div className="flex items-center space-x-4">{(['csv', 'json', 'print'] as OutputFormat[]).map((format) => (<label key={format} className="flex items-center"><input type="radio" name="output-format" value={format} checked={outputFormat === format} onChange={() => setOutputFormat(format)} className="h-4 w-4 text-indigo-600" /><span className="ml-2 text-sm capitalize">{format === 'print' ? 'Print to Console' : format.toUpperCase()}</span></label>))}</div></div><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={bsCode} /><AiCodeDebugger apiKey={apiKey} originalCode={bsCode} codeType="BeautifulSoup" /></div><div className="mt-4 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleStartOver} className="w-full bg-gray-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-gray-700 flex items-center justify-center gap-2"><ArrowPathIcon />Start Over</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button></div></div>);
+        } else {
+             return <div>Invalid Step</div>;
+        }
+    }
+
+    if (scrapingType === 'static') {
+        if (!staticSource) {
+            return (
+                <div>
+                    <h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Choose Static Scraping Source</h2>
+                    <p className="text-gray-600 mb-6">How do you want to get the HTML content?</p>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <button onClick={() => setStaticSource('url')} className="p-6 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition-all transform hover:scale-105"><h3 className="text-lg font-bold text-gray-900">Scrape from URL</h3><p className="text-sm text-gray-600 mt-2">Provide a URL to generate an all-in-one script that fetches and parses the live website.</p></button>
+                        <button onClick={() => setStaticSource('file')} className="p-6 border rounded-lg text-left hover:border-indigo-600 hover:bg-indigo-50 focus:outline-none focus:ring-2 focus:ring-indigo-600 transition-all transform hover:scale-105"><h3 className="text-lg font-bold text-gray-900">Extract from Local HTML Files</h3><p className="text-sm text-gray-600 mt-2">For when you already have the HTML files and just need to extract data from them.</p></button>
+                    </div>
+                    <div className="mt-8"><button onClick={handleBack} className="w-full sm:w-auto bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Change Method</button></div>
+                </div>
+            );
+        }
+
+        if (staticSource === 'file') {
+             switch (step) {
+                case 1: // Upload local files
+                  return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Upload Local HTML Files</h2><p className="text-gray-600 mb-4">Provide a project name and upload the HTML file(s) you want to extract data from.</p><div className="space-y-4">
+                        <div><label htmlFor="project-name" className="block text-sm font-medium text-gray-700">Project Folder Name</label><input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_html_data" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" /><p className="text-xs text-gray-500 mt-1">The final script will look for your HTML files in this folder.</p></div>
+                        <div><label className="block text-sm font-medium text-gray-700">HTML File(s)</label><p className="text-xs text-gray-500 mt-1 mb-2">Upload the HTML file to be used for the preview. The final script will process ALL .html files in the project folder.</p><div className="mt-2 flex justify-center rounded-lg border border-dashed border-gray-900/25 px-6 py-4"><div className="text-center"><div className="flex text-sm leading-6 text-gray-600"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 hover:text-indigo-500"><span>{htmlContents.length > 0 ? `Selected: ${htmlContents[0].name}` : 'Upload a file for preview'}</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label></div></div></div></div>
+                        {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                        <div className="mt-6 flex flex-col sm:flex-row-reverse gap-2"><button onClick={() => setStep(2)} disabled={htmlContents.length === 0} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 disabled:bg-indigo-300">Next: Define Extractors</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button></div></div></div>);
+                case 2: return renderExtractorUI(2);
+                case 3: return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 3: Final Extractor Script</h2><p className="text-gray-600 mb-4">Place your HTML files in a folder named <span className="font-mono bg-gray-200 p-1 rounded">{projectName}</span>. Run this script in the same directory as that folder.</p><div className="mb-4"><label className="block text-sm font-medium mb-2">Output Format:</label><div className="flex items-center space-x-4">{(['csv', 'json', 'print'] as OutputFormat[]).map((format) => (<label key={format} className="flex items-center"><input type="radio" name="output-format" value={format} checked={outputFormat === format} onChange={() => setOutputFormat(format)} className="h-4 w-4 text-indigo-600" /><span className="ml-2 text-sm capitalize">{format === 'print' ? 'Print to Console' : format.toUpperCase()}</span></label>))}</div></div><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={bsCode} /><AiCodeDebugger apiKey={apiKey} originalCode={bsCode} codeType="BeautifulSoup" /></div><div className="mt-4 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleStartOver} className="w-full bg-gray-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-gray-700 flex items-center justify-center gap-2"><ArrowPathIcon />Start Over</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button></div></div>);
+                default: return <div>Invalid Step</div>;
+            }
+        }
+        
+        if (staticSource === 'url') {
+            const extractorStep = useProxy ? 3 : 2;
+            const finalStep = useProxy ? 4 : 3;
+            
+            if (step === 1) {
+                return (
+                    <div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 1: Configure Static Scraper</h2><p className="text-gray-600 mb-4">Provide the target URL and an HTML sample file for defining extractors.</p><div className="space-y-4">
+                        <div><label htmlFor="project-name" className="block text-sm font-medium text-gray-700">Project Folder Name</label><input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_static_scraper" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" /><p className="text-xs text-gray-500 mt-1">The folder where output files (CSV, JSON) will be saved.</p></div>
+                        <div><label htmlFor="browser-select" className="block text-sm font-medium text-gray-700">Browser User-Agent</label><select id="browser-select" value={browser} onChange={(e) => setBrowser(e.target.value as Browser)} className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500"><option value="chrome">Chrome (Recommended)</option><option value="firefox">Firefox</option><option value="edge">Microsoft Edge</option><option value="brave">Brave</option><option value="opera">Opera</option></select><p className="text-xs text-gray-500 mt-1">This sets the User-Agent header for your requests to mimic a browser.</p></div>
+                        <div><label htmlFor="delay-timer" className="block text-sm font-medium text-gray-700">Delay Between Requests (milliseconds)</label><input id="delay-timer" type="number" value={delay} onChange={(e) => setDelay(Math.max(0, parseInt(e.target.value, 10) || 0))} min="0" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-indigo-500" /><p className="text-xs text-gray-500 mt-1">A polite delay to avoid overwhelming the server (e.g., 2000ms = 2s).</p></div>
+                        <div className="mt-4"><label className="flex items-center justify-between p-4 border rounded-lg cursor-pointer"><div><span className="font-semibold text-gray-900">Use Proxies</span><span className="block text-sm mt-1 text-gray-500">Route requests through a list of proxies.</span></div><div className={`relative inline-flex items-center h-6 rounded-full w-11 transition-colors ${useProxy ? 'bg-indigo-600' : 'bg-gray-200'}`}><span className={`inline-block w-4 h-4 transform bg-white rounded-full transition-transform ${useProxy ? 'translate-x-6' : 'translate-x-1'}`} /><input type="checkbox" checked={useProxy} onChange={(e) => setUseProxy(e.target.checked)} className="absolute w-full h-full opacity-0 cursor-pointer" /></div></label></div>
+                        <div><label className="block text-sm font-medium text-gray-700 mb-2">Scraping Scope</label><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingScope === 'single' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><span className="font-semibold text-gray-900">Single Page</span><span className="text-sm text-gray-500 mt-1">Scrape one URL.</span><input type="radio" name="scraping-scope" value="single" checked={scrapingScope === 'single'} onChange={() => setScrapingScope('single')} className="absolute h-full w-full opacity-0 cursor-pointer" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer ${scrapingScope === 'multi' ? 'border-indigo-600 bg-indigo-50 ring-2 ring-indigo-600' : 'border-gray-300 bg-white hover:bg-gray-50'}`}><span className="font-semibold text-gray-900">Multiple Pages</span><span className="text-sm text-gray-500 mt-1">Scrape using a URL pattern.</span><input type="radio" name="scraping-scope" value="multi" checked={scrapingScope === 'multi'} onChange={() => { setScrapingScope('multi'); setMultiPageMode('url'); }} className="absolute h-full w-full opacity-0 cursor-pointer" /></label></fieldset></div>
+                        {scrapingScope === 'multi' && (<div className="p-4 border border-indigo-200 bg-indigo-50 rounded-lg space-y-4"><div><label htmlFor="start-page" className="block text-sm font-medium text-gray-700">Start Page Number</label><input id="start-page" type="number" value={startPage} onChange={(e) => setStartPage(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md" /></div><div><label htmlFor="num-pages" className="block text-sm font-medium text-gray-700">Total Pages to Scrape</label><input id="num-pages" type="number" value={numPages} onChange={(e) => setNumPages(Math.max(1, parseInt(e.target.value, 10) || 1))} min="1" max="100" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md" /></div><div className="space-y-3"><div><label htmlFor="url-pattern-input" className="block text-sm font-medium text-gray-700">Example URL (from page 2+)</label><div className="flex items-center gap-2 mt-1"><input id="url-pattern-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com/products?page=2" className="flex-grow px-4 py-2 border border-gray-300 rounded-md" /><button onClick={handleAutoDetectUrlPattern} disabled={autoDetectUrlLoading} className="px-3 py-2 bg-indigo-100 text-indigo-700 font-semibold rounded-md hover:bg-indigo-200 disabled:bg-gray-200 disabled:text-gray-500 flex items-center">{autoDetectUrlLoading ? 'Detecting...' : "✨ Auto-detect Pattern"}</button></div></div><div><label htmlFor="url-prefix" className="block text-sm font-medium text-gray-700">URL Prefix</label><input id="url-prefix" type="text" value={urlPrefix} onChange={(e) => setUrlPrefix(e.target.value)} placeholder="https://example.com/page=" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div><div><label htmlFor="url-suffix" className="block text-sm font-medium text-gray-700">URL Suffix (optional)</label><input id="url-suffix" type="text" value={urlSuffix} onChange={(e) => setUrlSuffix(e.target.value)} placeholder=".html" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div></div></div>)}
+                        {scrapingScope === 'single' && (<div><label htmlFor="url-input" className="block text-sm font-medium text-gray-700">Website URL</label><input id="url-input" type="url" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://example.com" className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md" /></div>)}
+                        <div><label className="block text-sm font-medium text-gray-700">Sample HTML File</label><p className="text-xs text-gray-500 mt-1 mb-2">Upload an HTML file from the target site. This will be used as a preview to define your extractors.</p><div className="mt-2 flex justify-center rounded-lg border border-dashed border-gray-900/25 px-6 py-4"><div className="text-center"><div className="flex text-sm leading-6 text-gray-600"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 hover:text-indigo-500"><span>{htmlContents.length > 0 ? `Selected: ${htmlContents[0].name}` : 'Upload a file'}</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label></div></div></div></div>
+                        {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
+                        <div className="mt-6 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleNextFromStaticUrlConfig} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Continue</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Change Method</button></div></div></div>
+                );
+            } else if (useProxy && step === 2) {
+                return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step 2: Configure Proxies</h2><p className="text-gray-600 mb-4">Provide your list of proxies, one per line. Format: `ip:port`</p><div className="space-y-4"><div><label htmlFor="proxy-list" className="block text-sm font-medium text-gray-700">Proxy List</label><textarea id="proxy-list" rows={8} value={proxyList} onChange={(e) => setProxyList(e.target.value)} placeholder="192.168.1.1:8080&#10;192.168.1.2:8080" className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-md font-mono text-sm" /></div><div className="relative"><div className="absolute inset-0 flex items-center"><div className="w-full border-t border-gray-300" /></div><div className="relative flex justify-center"><span className="bg-white px-2 text-sm text-gray-500">Or</span></div></div><label htmlFor="proxy-file-upload" className="relative cursor-pointer rounded-md bg-white font-semibold text-indigo-600 focus-within:outline-none hover:text-indigo-500 text-center block border border-dashed py-4"><span>Upload a .txt file</span><input id="proxy-file-upload" type="file" className="sr-only" accept=".txt" onChange={handleProxyFileChange} /></label>{error && <p className="text-red-500 text-sm mt-2">{error}</p>}</div><div className="mt-6 flex flex-col sm:flex-row gap-2"><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button><button onClick={() => { if (useProxy && !proxyList.trim()) { setError('Please provide a list of proxies or disable the proxy option.'); return; } setError(''); setStep(3); }} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Next: Define Extractors</button></div></div>);
+            } else if (step === extractorStep) {
+                return renderExtractorUI(extractorStep);
+            } else if (step === finalStep) {
+                return (<div><h2 className="text-xl font-semibold text-gray-800 mb-2">Step {finalStep}: Final Scraper Script</h2><p className="text-gray-600 mb-4">Run this all-in-one script locally to fetch data from the URL(s) and save the results.</p><div className="mb-4"><label className="block text-sm font-medium mb-2">Output Format:</label><div className="flex items-center space-x-4">{(['csv', 'json', 'print'] as OutputFormat[]).map((format) => (<label key={format} className="flex items-center"><input type="radio" name="output-format" value={format} checked={outputFormat === format} onChange={() => setOutputFormat(format)} className="h-4 w-4 text-indigo-600" /><span className="ml-2 text-sm capitalize">{format === 'print' ? 'Print to Console' : format.toUpperCase()}</span></label>))}</div></div><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={bsCode} /><AiCodeDebugger apiKey={apiKey} originalCode={bsCode} codeType="BeautifulSoup" /></div><div className="mt-4 flex flex-col sm:flex-row-reverse gap-2"><button onClick={handleStartOver} className="w-full bg-gray-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-gray-700 flex items-center justify-center gap-2"><ArrowPathIcon />Start Over</button><button onClick={handleBack} className="w-full bg-gray-200 text-gray-700 font-semibold py-2 px-4 rounded-md hover:bg-gray-300">Back</button></div></div>);
+            } else {
+                 return <div>Invalid Step</div>;
+            }
+        }
+    }
+  };
+  
+  const renderAdvisor = () => (
+      <div className="w-full max-w-2xl text-center">
+        <h1 className="text-3xl font-bold text-gray-900">AI Method Advisor</h1>
+        <p className="text-gray-600 mt-2">Enter your target URL and let AI recommend the best scraping method for you.</p>
+        <div className="mt-6 flex flex-col sm:flex-row gap-2">
+            <input 
+                type="url" 
+                value={analysisUrl}
+                onChange={(e) => setAnalysisUrl(e.target.value)}
+                placeholder="https://example.com"
+                className="flex-grow w-full px-4 py-2 border border-gray-300 rounded-md"
+                disabled={analysisLoading}
+            />
+            <button 
+                onClick={handleAnalyzeUrl} 
+                className="w-full sm:w-auto bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center justify-center"
+                disabled={analysisLoading}
+            >
+                {analysisLoading ? (
+                    <>
+                        <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                        Analyzing...
+                    </>
+                ) : "Analyze URL"}
+            </button>
         </div>
-        <main className="bg-white rounded-xl shadow-lg p-6 md:p-8">
-          {renderStep()}
-        </main>
+        
+        {error && <p className="text-red-500 text-sm mt-4">{error}</p>}
+        
+        {analysisResult && (
+            <div className="mt-8 text-left p-6 bg-indigo-50 border border-indigo-200 rounded-lg animate-fade-in">
+                <h3 className="text-lg font-semibold text-gray-900">AI Recommendation</h3>
+                <div className={`mt-2 font-bold text-xl ${analysisResult.recommendation === 'dynamic' ? 'text-blue-600' : 'text-green-600'}`}>
+                    {analysisResult.recommendation === 'dynamic' ? 'Dynamic Scraping (Selenium)' : 'Static Scraping (BeautifulSoup)'}
+                </div>
+                <p className="mt-2 text-gray-700">{analysisResult.reason}</p>
+                <div className="mt-6 flex flex-col sm:flex-row gap-3">
+                    <button onClick={handleProceedWithRecommendation} className="w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">
+                        Proceed with Recommendation
+                    </button>
+                    <button onClick={() => setCurrentView('app')} className="w-full bg-white text-gray-700 font-semibold py-2 px-4 rounded-md border border-gray-300 hover:bg-gray-100">
+                        Choose Manually Instead
+                    </button>
+                </div>
+            </div>
+        )}
+        
+        <div className="mt-8">
+            <button onClick={() => setCurrentView('app')} className="text-indigo-600 hover:underline text-sm font-semibold">
+                or, skip and choose method manually &rarr;
+            </button>
+        </div>
       </div>
-    </div>
   );
+
+
+  if (currentView === 'apiKey') {
+    return (<div className="min-h-screen bg-gray-100 flex items-center justify-center p-4"><div className="w-full max-w-md"><div className="bg-white rounded-xl shadow-lg p-8"><h1 className="text-2xl font-bold text-gray-900 text-center">Welcome to the Dynamic Web Scraper Generator</h1><p className="text-gray-600 mt-2 text-center">To use the AI-powered features, please enter your Google AI API Key.</p><div className="mt-6"><label htmlFor="api-key-input" className="block text-sm font-medium text-gray-700">Google AI API Key</label><input id="api-key-input" type="password" value={apiKeyInput} onChange={(e) => setApiKeyInput(e.target.value)} placeholder="Enter your API key here" className="mt-1 w-full px-4 py-2 border border-gray-300 rounded-md" /></div>{error && <p className="text-red-500 text-sm mt-2">{error}</p>}<button onClick={handleApiKeySubmit} className="mt-6 w-full bg-indigo-600 text-white font-semibold py-2 px-4 rounded-md hover:bg-indigo-700">Continue</button><p className="text-xs text-gray-500 mt-4 text-center">Get a key from <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline">Google AI Studio</a>.</p></div></div></div>);
+  }
+
+  if (currentView === 'advisor') {
+      return (
+        <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+          {renderAdvisor()}
+        </div>
+      );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100 flex flex-col items-center justify-center p-4"><div className="w-full max-w-5xl"><header className="text-center mb-8"><h1 className="text-4xl font-bold text-gray-900">Dynamic Web Scraper Generator</h1><p className="text-lg text-gray-600 mt-2">Generate web scraping scripts in a few easy steps.</p></header>{scrapingType && (<div className="mb-8"><StepIndicator currentStep={step} steps={steps} /></div>)}<main className="bg-white rounded-xl shadow-lg p-6 md:p-8">{renderAppContent()}</main></div></div>);
 };
 
 export default App;
