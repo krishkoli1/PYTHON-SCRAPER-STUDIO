@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { ClipboardIcon } from './icons/ClipboardIcon';
 import { CheckIcon } from './icons/CheckIcon';
@@ -19,10 +18,10 @@ export const CodeBlock: React.FC<CodeBlockProps> = ({ code, language = 'python' 
   };
 
   return (
-    <div className="bg-gray-900 rounded-lg overflow-hidden relative group">
+    <div className="bg-black rounded-b-lg overflow-hidden relative group">
       <button
         onClick={handleCopy}
-        className="absolute top-2 right-2 p-2 bg-gray-700 rounded-md text-gray-300 hover:bg-gray-600 hover:text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-gray-900 focus:ring-indigo-500 opacity-0 group-hover:opacity-100 transition-opacity"
+        className="absolute top-2 right-2 p-2 bg-zinc-800 rounded-md text-zinc-300 hover:bg-zinc-700 hover:text-white focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-offset-black focus:ring-white opacity-0 group-hover:opacity-100 transition-opacity"
         aria-label="Copy code"
       >
         {copied ? <CheckIcon /> : <ClipboardIcon />}

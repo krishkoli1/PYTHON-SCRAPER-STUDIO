@@ -58,7 +58,7 @@ This flow generates two scripts: one to fetch HTML and another to parse it.
 4.  **Upload Sample HTML**:
     - Upload one of the `.html` files that the Selenium script just saved. This will be used as a template for the next step.
 5.  **Define Extractors**:
-    - Use the interactive preview to define what data to extract. You can point-and-click elements with the cursor icon (`️CursorArrowRaysIcon`) or let the AI "✨ Auto-detect Fields".
+    - Use the interactive preview to define what data to extract. You can point-and-click elements with the cursor icon (`CursorArrowRaysIcon`) or let the AI "✨ Auto-detect Fields".
     - Test your selectors to see a live preview of the results.
 6.  **Get Final Scraper**:
     - The app generates the final BeautifulSoup script.
