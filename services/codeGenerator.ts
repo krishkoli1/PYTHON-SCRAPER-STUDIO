@@ -1,6 +1,6 @@
 import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type GenerateBsCodeParams } from '../types';
 
-interface GenerateSeleniumCodeParams {
+interface GenerateDynamicCodeParams {
   url: string;
   projectName: string;
   scrapingScope: ScrapingScope;
@@ -95,7 +95,7 @@ except Exception as e:
 };
 
 
-export const generateSeleniumCode = (params: GenerateSeleniumCodeParams): string => {
+export const generateSeleniumCode = (params: GenerateDynamicCodeParams): string => {
   const { url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList, browser, delay } = params;
   
   const proxyListCleaned = proxyList?.trim() || '';
@@ -242,6 +242,175 @@ print("\\nScraping finished. Browser closed.")
 `;
   }
 };
+
+export const generatePlaywrightCode = (params: GenerateDynamicCodeParams): string => {
+  const { url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList, browser, delay } = params;
+
+  const proxyListCleaned = proxyList?.trim() || '';
+  const delayInMilliseconds = delay;
+
+  const browserMap: { [key in Browser]: string } = {
+      'chrome': 'chromium',
+      'firefox': 'firefox',
+      'edge': 'chromium',
+      'brave': 'chromium',
+      'opera': 'chromium',
+  };
+  const playwrightBrowser = browserMap[browser] || 'chromium';
+
+  const commonSetup = `import time
+import os
+import random
+from playwright.sync_api import sync_playwright
+
+# --- Setup Instructions ---
+# 1. Make sure you have Python installed.
+# 2. Install required libraries:
+#    pip install playwright
+# 3. Install Playwright's browser binaries:
+#    playwright install
+
+# --- Configuration ---
+# The folder where all files will be saved
+folder_name = "${projectName}"
+# Time to wait for pages to load, in milliseconds. Increase for slower websites.
+ACTION_DELAY = ${delayInMilliseconds}
+
+# --- Script ---
+os.makedirs(folder_name, exist_ok=True)
+`;
+
+  const proxySetup = proxyListCleaned ? `
+proxies = [
+    "${proxyListCleaned.split('\n').join('",\n    "')}"
+]
+chosen_proxy = random.choice(proxies)
+print(f"Using proxy: {chosen_proxy}")
+launch_options['proxy'] = { "server": f"http://{chosen_proxy}" }
+` : '';
+
+  const mainLogic = (isSingle: boolean): string => `
+with sync_playwright() as p:
+    launch_options = {"headless": False}
+    ${proxySetup}
+    
+    try:
+        browser_instance = p.${playwrightBrowser}.launch(**launch_options)
+    except Exception as e:
+        print(f"Error launching ${playwrightBrowser} with Playwright: {e}")
+        print("Please ensure you have run 'playwright install'.")
+        exit()
+
+    page = browser_instance.new_page()
+    ${ isSingle ? `
+    # The URL to scrape
+    url = "${url}"
+
+    print(f"Opening URL: {url}")
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        print(f"Error navigating to {url}: {e}")
+        browser_instance.close()
+        exit()
+
+    # Wait for the page to load dynamically.
+    print(f"Waiting for page to load ({ACTION_DELAY}ms)...")
+    page.wait_for_timeout(ACTION_DELAY)
+
+    # Save the page source to an HTML file
+    file_name = os.path.join(folder_name, "dataset.html")
+    try:
+        with open(file_name, "w", encoding="utf-8") as f:
+            f.write(page.content())
+        print(f"Successfully saved page HTML to '{file_name}'")
+    except Exception as e:
+        print(f"Error saving file: {e}")
+    ` : (multiPageMode === 'button' ? `
+    # The URL to start scraping from
+    url = "${url}"
+
+    print(f"Opening URL: {url}")
+    try:
+        page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    except Exception as e:
+        print(f"Error navigating to {url}: {e}")
+        browser_instance.close()
+        exit()
+
+    start_page = ${startPage}
+    pages_to_scrape = ${numPages}
+    next_button_selector = "${nextPageSelector.replace(/"/g, '\\"')}"
+
+    print(f"\\nStarting scrape of {pages_to_scrape} pages by clicking the 'next' button...")
+
+    for i in range(pages_to_scrape):
+        page_num = start_page + i
+        print(f"\\nProcessing page {page_num}...")
+        # Wait for the page to load dynamically.
+        print(f"Waiting for page to load ({ACTION_DELAY}ms)...")
+        page.wait_for_timeout(ACTION_DELAY)
+        
+        # Save the page source to an HTML file
+        file_name = os.path.join(folder_name, f"dataset_{page_num}.html")
+        try:
+            with open(file_name, "w", encoding="utf-8") as f:
+                f.write(page.content())
+            print(f"Successfully saved page HTML to '{file_name}'")
+        except Exception as e:
+            print(f"Error saving file '{file_name}': {e}")
+
+        if i == pages_to_scrape - 1:
+            print("\\nReached target number of pages.")
+            break
+            
+        try:
+            print("Found next page button, clicking...")
+            page.locator(next_button_selector).click()
+        except Exception as e:
+            print("Could not find or click the next page button. Ending scrape.")
+            # print(f"Reason: {e}") # Uncomment for details
+            break
+    ` : `
+    # The URL pattern for the pages to scrape.
+    url_prefix = "${(urlPrefix || '').replace(/"/g, '\\"')}"
+    url_suffix = "${(urlSuffix || '').replace(/"/g, '\\"')}"
+
+    start_page = ${startPage}
+    pages_to_scrape = ${numPages}
+    end_page = start_page + pages_to_scrape
+
+    print(f"\\nStarting scrape of {pages_to_scrape} pages using URL pattern...")
+    print(f"Range: page {start_page} to {end_page - 1}")
+
+    for page_num in range(start_page, end_page):
+        current_url = f"{url_prefix}{page_num}{url_suffix}"
+        print(f"\\nProcessing page {page_num}: {current_url}")
+
+        try:
+            page.goto(current_url, wait_until="domcontentloaded", timeout=60000)
+        except Exception as e:
+            print(f"    Error opening URL {current_url}: {e}")
+            continue
+
+        print(f"Waiting for page to load ({ACTION_DELAY}ms)...")
+        page.wait_for_timeout(ACTION_DELAY)
+        
+        file_name = os.path.join(folder_name, f"dataset_{page_num}.html")
+        try:
+            with open(file_name, "w", encoding="utf-8") as f:
+                f.write(page.content())
+            print(f"Successfully saved page HTML to '{file_name}'")
+        except Exception as e:
+            print(f"Error saving file '{file_name}': {e}")
+    `)}
+    # Clean up and close the browser
+    browser_instance.close()
+    print("\\nScraping finished. Browser closed.")
+`;
+  return commonSetup + mainLogic(scrapingScope === 'single');
+};
+
 
 const convertToCssSelector = (tag: string, attrs: string): string => {
     let selector = tag.trim();

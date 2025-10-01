@@ -2,11 +2,12 @@
 
 This is a powerful web-based tool designed to simplify the process of creating web scraping scripts. It generates custom Python scripts for both dynamic (JavaScript-heavy) and static websites, integrating AI-powered features to make configuration easier and more intuitive.
 
-Whether you need to control a real browser with **Selenium** or perform lightweight fetching with **Requests** and **BeautifulSoup**, this tool provides a complete, multi-step workflow to get you the data you need.
+Whether you need to control a real browser with **Selenium** or the modern **Playwright**, or perform lightweight fetching with **Requests** and **BeautifulSoup**, this tool provides a complete, multi-step workflow to get you the data you need.
 
 ## ✨ Features
 
-- **Dual Scraping Modes**: Choose between **Dynamic (Selenium)** for complex, interactive sites and **Static (Requests/BeautifulSoup)** for simpler, faster scraping.
+- **Dual Scraping Modes**: Choose between **Dynamic** for complex, interactive sites and **Static (Requests/BeautifulSoup)** for simpler, faster scraping.
+- **Selenium & Playwright Support**: Choose between the classic Selenium or the modern Playwright for dynamic scraping.
 - **Flexible Data Sources**: Scrape from live URLs or process local HTML files you already have.
 - **Advanced Pagination Control**: Handles multi-page scraping by clicking 'Next' buttons or following numeric URL patterns.
 - **Powerful Extractor UI**: An interactive interface with a live preview to visually define data extraction points using point-and-click or by manually specifying CSS selectors.
@@ -38,25 +39,26 @@ To enable the AI-powered features (like auto-detection and the debugger), you mu
 
 If you skipped the AI advisor or chose to select manually, you'll be presented with two main choices:
 
-1.  **Dynamic Web Scraping**: For modern websites that load content with JavaScript. This will use **Selenium**.
+1.  **Dynamic Web Scraping**: For modern websites that load content with JavaScript. This will use **Selenium** or **Playwright**.
 2.  **Static Web Scraping**: For traditional websites where all content is in the initial HTML. This will use **Requests** and **BeautifulSoup**.
 
 ---
 
-### Dynamic Scraping Workflow (Selenium)
+### Dynamic Scraping Workflow (Selenium / Playwright)
 
 This flow generates two scripts: one to fetch HTML and another to parse it.
 
 1.  **Configure Scraper**:
+    - Choose your automation engine (**Selenium** or **Playwright**).
     - Set a project folder name, choose a browser (e.g., Chrome, Firefox), and define a delay between actions.
     - Optionally, enable and configure proxies.
     - Define the URL and pagination method ('Next' Button or URL Pattern). Use the "✨" buttons for AI assistance.
 2.  **(Conditional) Configure Proxies**: If enabled, paste or upload your proxy list.
-3.  **Run Selenium Script**:
-    - The app generates the first Python script.
+3.  **Run Fetcher Script**:
+    - The app generates the first Python script (using either Selenium or Playwright).
     - **Action**: Copy this script and run it on your local machine. It will launch the selected browser, navigate the site, and save the HTML of each page into your project folder.
 4.  **Upload Sample HTML**:
-    - Upload one of the `.html` files that the Selenium script just saved. This will be used as a template for the next step.
+    - Upload one of the `.html` files that the script just saved. This will be used as a template for the next step.
 5.  **Define Extractors**:
     - Use the interactive preview to define what data to extract. You can point-and-click elements with the cursor icon (`CursorArrowRaysIcon`) or let the AI "✨ Auto-detect Fields".
     - Test your selectors to see a live preview of the results.
@@ -99,6 +101,10 @@ You must have **Python 3** installed on your machine.
 3.  Install the required Python libraries using the provided `requirements.txt` file.
     ```bash
     pip install -r requirements.txt
+    ```
+4.  If you generated a **Playwright** script, you also need to install its browser binaries:
+    ```bash
+    playwright install
     ```
 
 ### Execution

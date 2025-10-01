@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type StaticSourceType } from './types';
-import { generateSeleniumCode, generateBeautifulSoupCode } from './services/codeGenerator';
+import { generateSeleniumCode, generateBeautifulSoupCode, generatePlaywrightCode } from './services/codeGenerator';
 import { CodeBlock } from './components/CodeBlock';
 import { StepIndicator } from './components/StepIndicator';
 import { PlusIcon } from './components/icons/PlusIcon';
@@ -24,7 +24,7 @@ type AiRecommendation = { recommendation: ScrapingType; reason: string; };
 const AiCodeDebugger: React.FC<{
   apiKey: string;
   originalCode: string;
-  codeType: 'Selenium' | 'BeautifulSoup';
+  codeType: 'Selenium' | 'BeautifulSoup' | 'Playwright';
 }> = ({ apiKey, originalCode, codeType }) => {
   const [errorInput, setErrorInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -130,6 +130,7 @@ const App: React.FC = () => {
 
   const [step, setStep] = useState<number>(1);
   const [scrapingType, setScrapingType] = useState<ScrapingType | null>(null);
+  const [dynamicEngine, setDynamicEngine] = useState<'selenium' | 'playwright'>('selenium');
   const [staticSource, setStaticSource] = useState<StaticSourceType | null>(null);
 
   const [url, setUrl] = useState<string>('');
@@ -166,6 +167,7 @@ const App: React.FC = () => {
   ]);
   
   const [seleniumCode, setSeleniumCode] = useState<string>('');
+  const [playwrightCode, setPlaywrightCode] = useState<string>('');
   const [bsCode, setBsCode] = useState<string>('');
   const [error, setError] = useState<string>('');
   
@@ -188,6 +190,7 @@ const App: React.FC = () => {
   const resetAllState = () => {
     setStep(1);
     setScrapingType(null);
+    setDynamicEngine('selenium');
     setStaticSource(null);
     setUrl('');
     setProjectName('scraping_project');
@@ -207,6 +210,7 @@ const App: React.FC = () => {
     setContainer({ tag: '', attrs: '' });
     setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
     setSeleniumCode('');
+    setPlaywrightCode('');
     setBsCode('');
     setError('');
     setSelectingFor(null);
@@ -307,14 +311,26 @@ Respond with a JSON object with two keys:
     return true;
   }
 
+  const handleGenerateDynamicCode = (proxies: string) => {
+    const params = { url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList: proxies, browser, delay };
+    if (dynamicEngine === 'playwright') {
+        const code = generatePlaywrightCode(params);
+        setPlaywrightCode(code);
+        setSeleniumCode('');
+    } else {
+        const code = generateSeleniumCode(params);
+        setSeleniumCode(code);
+        setPlaywrightCode('');
+    }
+  }
+
   const handleNextFromDynamicConfig = () => {
     if (!validateUrlConfig()) return;
     
     if (useProxy) {
       setStep(2); // Go to proxy step
     } else {
-      const code = generateSeleniumCode({ url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList: '', browser, delay, });
-      setSeleniumCode(code);
+      handleGenerateDynamicCode('');
       setStep(2); // Go to Selenium script step
     }
   };
@@ -332,15 +348,14 @@ Respond with a JSON object with two keys:
       }
   }
 
-  const handleGenerateSeleniumWithProxy = () => {
+  const handleGenerateDynamicWithProxy = () => {
     if (useProxy && !proxyList.trim()) {
       setError('Please provide a list of proxies or disable the proxy option.');
       return;
     }
     setError('');
-    const code = generateSeleniumCode({ url, projectName, scrapingScope, multiPageMode, startPage, numPages, nextPageSelector, urlPrefix, urlSuffix, proxyList: proxyList, browser, delay, });
-    setSeleniumCode(code);
-    setStep(3); // Go to Selenium script step
+    handleGenerateDynamicCode(proxyList);
+    setStep(3); // Go to script step
   };
 
   const handleProxyFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -707,7 +722,8 @@ Respond with a JSON object with two keys:
 
   let steps: string[] = [];
   if (scrapingType === 'dynamic') {
-      steps = ["Configure", "Run Selenium", "Upload Sample", "Define Extractors", "Get Scraper"];
+      const engineName = dynamicEngine === 'playwright' ? 'Playwright' : 'Selenium';
+      steps = ["Configure", `Run ${engineName} Script`, "Upload Sample", "Define Extractors", "Get Scraper"];
       if (useProxy) { steps.splice(1, 0, "Configure Proxies"); }
   } else if (scrapingType === 'static') {
       if (staticSource === 'url') {
@@ -760,14 +776,17 @@ Respond with a JSON object with two keys:
     }
 
     if (scrapingType === 'dynamic') {
-        const seleniumStep = useProxy ? 3 : 2;
+        const scriptStep = useProxy ? 3 : 2;
         const uploadStep = useProxy ? 4 : 3;
         const extractorStep = useProxy ? 5 : 4;
         const finalStep = useProxy ? 6 : 5;
+        const engineName = dynamicEngine === 'playwright' ? 'Playwright' : 'Selenium';
+        const codeToDisplay = dynamicEngine === 'playwright' ? playwrightCode : seleniumCode;
 
         if (step === 1) {
             return (
-              <div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step 1: Configure Scraper</h2><p className="text-zinc-400 mb-4">Set up the details for your Selenium-based scraper.</p><div className="space-y-4">
+              <div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step 1: Configure Scraper</h2><p className="text-zinc-400 mb-4">Set up the details for your dynamic scraper.</p><div className="space-y-4">
+                  <div><label className="block text-sm font-medium text-zinc-300 mb-2">Automation Engine</label><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${dynamicEngine === 'selenium' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Selenium</span><span className="text-sm text-zinc-400 mt-1">Classic, highly compatible.</span><input type="radio" name="dynamic-engine" value="selenium" checked={dynamicEngine === 'selenium'} onChange={() => setDynamicEngine('selenium')} className="absolute h-full w-full opacity-0 cursor-pointer" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${dynamicEngine === 'playwright' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Playwright</span><span className="text-sm text-zinc-400 mt-1">Modern, fast, and reliable.</span><input type="radio" name="dynamic-engine" value="playwright" checked={dynamicEngine === 'playwright'} onChange={() => setDynamicEngine('playwright')} className="absolute h-full w-full opacity-0 cursor-pointer" /></label></fieldset></div>
                   <div><label htmlFor="project-name" className="block text-sm font-medium text-zinc-300">Project Folder Name</label><input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_web_scraper" className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md bg-zinc-900 text-zinc-200 focus:ring-2 focus:ring-white" /><p className="text-xs text-zinc-500 mt-1">All generated files (HTML, CSV, etc.) will be saved in this folder.</p></div>
                   <div><label htmlFor="browser-select" className="block text-sm font-medium text-zinc-300">Browser</label><select id="browser-select" value={browser} onChange={(e) => setBrowser(e.target.value as Browser)} className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md bg-zinc-900 text-zinc-200 focus:ring-2 focus:ring-white"><option value="chrome">Chrome (Recommended)</option><option value="firefox">Firefox</option><option value="edge">Microsoft Edge</option><option value="brave">Brave</option><option value="opera">Opera</option></select></div>
                   <div><label htmlFor="delay-timer" className="block text-sm font-medium text-zinc-300">Delay Between Actions (milliseconds)</label><input id="delay-timer" type="number" value={delay} onChange={(e) => setDelay(Math.max(0, parseInt(e.target.value, 10) || 0))} min="0" className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md bg-zinc-900 text-zinc-200 focus:ring-2 focus:ring-white" /><p className="text-xs text-zinc-500 mt-1">Time to wait for pages to load (e.g., 5000ms = 5s). Increase for slower websites.</p></div>
@@ -779,11 +798,11 @@ Respond with a JSON object with two keys:
                   <div className="mt-6 flex flex-col sm:flex-row-reverse gap-3"><button onClick={handleNextFromDynamicConfig} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 transition-all">Continue</button><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Change Method</button></div></div></div>
             );
         } else if (useProxy && step === 2) {
-            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step 2: Configure Proxies</h2><p className="text-zinc-400 mb-4">Provide your list of proxies, one per line. Format: `ip:port`</p><div className="space-y-4"><div><label htmlFor="proxy-list" className="block text-sm font-medium text-zinc-300">Proxy List</label><textarea id="proxy-list" rows={8} value={proxyList} onChange={(e) => setProxyList(e.target.value)} placeholder="192.168.1.1:8080&#10;192.168.1.2:8080" className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200" /></div><div className="relative"><div className="absolute inset-0 flex items-center"><div className="w-full border-t border-zinc-700" /></div><div className="relative flex justify-center"><span className="bg-black/60 px-2 text-sm text-zinc-500">Or</span></div></div><label htmlFor="proxy-file-upload" className="relative cursor-pointer rounded-lg bg-transparent font-semibold text-zinc-200 focus-within:outline-none hover:text-white text-center block border border-dashed border-zinc-700 py-4 hover:border-zinc-500"><span>Upload a .txt file</span><input id="proxy-file-upload" type="file" className="sr-only" accept=".txt" onChange={handleProxyFileChange} /></label>{error && <p className="text-red-400 font-semibold text-sm mt-2">{error}</p>}</div><div className="mt-6 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={handleGenerateSeleniumWithProxy} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 transition-all">Generate Selenium Code</button></div></div>);
-        } else if (step === seleniumStep) {
-            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step {seleniumStep}: Run Selenium Script</h2><p className="text-zinc-400 mb-4">Run this script locally to create a <span className="font-mono bg-zinc-800 p-1 rounded">{projectName}</span> folder and save the page HTML inside it.</p><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={seleniumCode} /><AiCodeDebugger apiKey={apiKey} originalCode={seleniumCode} codeType="Selenium" /></div><div className="mt-4 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={() => setStep(seleniumStep + 1)} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 transition-all">Next: Upload Sample HTML</button></div></div>);
+            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step 2: Configure Proxies</h2><p className="text-zinc-400 mb-4">Provide your list of proxies, one per line. Format: `ip:port`</p><div className="space-y-4"><div><label htmlFor="proxy-list" className="block text-sm font-medium text-zinc-300">Proxy List</label><textarea id="proxy-list" rows={8} value={proxyList} onChange={(e) => setProxyList(e.target.value)} placeholder="192.168.1.1:8080&#10;192.168.1.2:8080" className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200" /></div><div className="relative"><div className="absolute inset-0 flex items-center"><div className="w-full border-t border-zinc-700" /></div><div className="relative flex justify-center"><span className="bg-black/60 px-2 text-sm text-zinc-500">Or</span></div></div><label htmlFor="proxy-file-upload" className="relative cursor-pointer rounded-lg bg-transparent font-semibold text-zinc-200 focus-within:outline-none hover:text-white text-center block border border-dashed border-zinc-700 py-4 hover:border-zinc-500"><span>Upload a .txt file</span><input id="proxy-file-upload" type="file" className="sr-only" accept=".txt" onChange={handleProxyFileChange} /></label>{error && <p className="text-red-400 font-semibold text-sm mt-2">{error}</p>}</div><div className="mt-6 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={handleGenerateDynamicWithProxy} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 transition-all">Generate {engineName} Code</button></div></div>);
+        } else if (step === scriptStep) {
+            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step {scriptStep}: Run {engineName} Script</h2><p className="text-zinc-400 mb-4">Run this script locally to create a <span className="font-mono bg-zinc-800 p-1 rounded">{projectName}</span> folder and save the page HTML inside it.</p><div className="rounded-lg shadow-md overflow-hidden"><CodeBlock code={codeToDisplay} /><AiCodeDebugger apiKey={apiKey} originalCode={codeToDisplay} codeType={engineName} /></div><div className="mt-4 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={() => setStep(scriptStep + 1)} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 transition-all">Next: Upload Sample HTML</button></div></div>);
         } else if (step === uploadStep) {
-            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step {uploadStep}: Upload Sample HTML File</h2><p className="text-zinc-400 mb-4">Upload one of the HTML files your Selenium script generated.</p><div className="mt-4 flex justify-center rounded-lg border border-dashed border-zinc-700 px-6 py-10"><div className="text-center"><div className="mt-4 flex text-sm leading-6 text-zinc-400"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md font-semibold text-white hover:text-zinc-300"><span>Upload a file</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label><p className="pl-1">or drag and drop</p></div><p className="text-xs leading-5 text-zinc-500">A single HTML file up to 10MB</p></div></div>{error && <p className="text-red-400 font-semibold text-sm mt-2">{error}</p>}<div className="mt-6 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={() => setStep(uploadStep + 1)} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 disabled:bg-zinc-600 disabled:text-zinc-400 disabled:cursor-not-allowed transition-all" disabled={htmlContents.length === 0}>Next: Define Extractors</button></div></div>);
+            return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step {uploadStep}: Upload Sample HTML File</h2><p className="text-zinc-400 mb-4">Upload one of the HTML files your {engineName} script generated.</p><div className="mt-4 flex justify-center rounded-lg border border-dashed border-zinc-700 px-6 py-10"><div className="text-center"><div className="mt-4 flex text-sm leading-6 text-zinc-400"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md font-semibold text-white hover:text-zinc-300"><span>Upload a file</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label><p className="pl-1">or drag and drop</p></div><p className="text-xs leading-5 text-zinc-500">A single HTML file up to 10MB</p></div></div>{error && <p className="text-red-400 font-semibold text-sm mt-2">{error}</p>}<div className="mt-6 flex flex-col sm:flex-row gap-3"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={() => setStep(uploadStep + 1)} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 disabled:bg-zinc-600 disabled:text-zinc-400 disabled:cursor-not-allowed transition-all" disabled={htmlContents.length === 0}>Next: Define Extractors</button></div></div>);
         } else if (step === extractorStep) {
             return renderExtractorUI(extractorStep);
         } else if (step === finalStep) {
