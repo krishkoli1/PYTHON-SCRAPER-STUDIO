@@ -1,5 +1,7 @@
+
+
 import React, { useState, useCallback, useRef, useEffect } from 'react';
-import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type StaticSourceType } from './types';
+import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type StaticSourceType, type LinkExtractionStrategy } from './types';
 import { generateSeleniumCode, generateBeautifulSoupCode, generatePlaywrightCode } from './services/codeGenerator';
 import { CodeBlock } from './components/CodeBlock';
 import { StepIndicator } from './components/StepIndicator';
@@ -20,12 +22,13 @@ type ScrapingType = 'dynamic' | 'static';
 type CurrentView = 'apiKey' | 'advisor' | 'app';
 type AiRecommendation = { recommendation: ScrapingType; reason: string; };
 
-
-const AiCodeDebugger: React.FC<{
+type AiCodeDebuggerProps = {
   apiKey: string;
   originalCode: string;
-  codeType: 'Selenium' | 'BeautifulSoup' | 'Playwright';
-}> = ({ apiKey, originalCode, codeType }) => {
+  codeType: 'Selenium' | 'BeautifulSoup' | 'Playwright' | 'General Python';
+};
+
+const AiCodeDebugger: React.FC<AiCodeDebuggerProps> = ({ apiKey, originalCode, codeType }) => {
   const [errorInput, setErrorInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [fixerError, setFixerError] = useState('');
@@ -41,7 +44,7 @@ const AiCodeDebugger: React.FC<{
     setFixedCode(null);
     try {
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `You are an expert Python developer specializing in web scraping with ${codeType}.
+      const prompt = `You are an expert Python developer specializing in ${codeType === 'General Python' ? 'general Python scripting and file processing' : `web scraping with ${codeType}`}.
 The user was given the following Python script to run:
 --- START OF SCRIPT ---
 ${originalCode}
@@ -59,7 +62,9 @@ IMPORTANT:
 - Do not add any explanations, apologies, or introductory text. Just provide the raw code.`;
 
       const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
-      const newCode = response.text.trim();
+      let newCode = response.text.trim();
+      newCode = newCode.replace(/^```(?:python\n)?/, '').replace(/```$/, '').trim();
+      
       if (newCode) {
         setFixedCode(newCode);
       } else {
@@ -165,13 +170,24 @@ const App: React.FC = () => {
   const [extractors, setExtractors] = useState<Extractor[]>([
     { id: Date.now(), name: 'item_1', tag: '', attrs: '' },
   ]);
+
+  const [linkExtractionStrategy, setLinkExtractionStrategy] = useState<LinkExtractionStrategy>('all');
+  const [linkContainer, setLinkContainer] = useState<Omit<Extractor, 'id' | 'name'>>({ tag: '', attrs: '' });
+  const [linkSelector, setLinkSelector] = useState<Omit<Extractor, 'id' | 'name'>>({ tag: 'a', attrs: '' });
+  const [isLinkContainerSet, setLinkContainerSet] = useState<boolean>(false);
+  const [linkContainerTestResult, setLinkContainerTestResult] = useState<{ count: number; preview: string; error?: boolean } | null>(null);
+  const [linkSelectorTestResult, setLinkSelectorTestResult] = useState<{ count: number; preview: string; error?: boolean } | null>(null);
+
+  const [extractedLinks, setExtractedLinks] = useState<{ text: string, href: string, selected: boolean }[]>([]);
+  const [aiLinkFilterPrompt, setAiLinkFilterPrompt] = useState<string>('');
+  const [aiLinkFilterLoading, setAiLinkFilterLoading] = useState<boolean>(false);
   
   const [seleniumCode, setSeleniumCode] = useState<string>('');
   const [playwrightCode, setPlaywrightCode] = useState<string>('');
   const [bsCode, setBsCode] = useState<string>('');
   const [error, setError] = useState<string>('');
   
-  const [selectingFor, setSelectingFor] = useState<'container' | number | null>(null);
+  const [selectingFor, setSelectingFor] = useState<'container' | number | 'linkContainer' | 'linkSelector' | null>(null);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   
   const [testResults, setTestResults] = useState<{ [key: number]: { count: number; preview: string; error?: boolean } }>({});
@@ -209,6 +225,9 @@ const App: React.FC = () => {
     setScrapingMode('structured');
     setContainer({ tag: '', attrs: '' });
     setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
+    setExtractedLinks([]);
+    setAiLinkFilterPrompt('');
+    setAiLinkFilterLoading(false);
     setSeleniumCode('');
     setPlaywrightCode('');
     setBsCode('');
@@ -217,6 +236,12 @@ const App: React.FC = () => {
     setTestResults({});
     setContainerTestResult(null);
     setContainerSet(false);
+    setLinkExtractionStrategy('all');
+    setLinkContainer({ tag: '', attrs: '' });
+    setLinkSelector({ tag: 'a', attrs: '' });
+    setLinkContainerTestResult(null);
+    setLinkSelectorTestResult(null);
+    setLinkContainerSet(false);
     setExtractionMethod(null);
     setOutputFormat('csv');
     setStartPageHtml('');
@@ -243,6 +268,7 @@ const App: React.FC = () => {
     setAnalysisResult(null);
     try {
       const ai = new GoogleGenAI({ apiKey });
+      const encodedAnalysisUrl = encodeURI(analysisUrl);
       const prompt = `You are a web scraping expert. Your task is to analyze a given URL and recommend the best scraping method.
 
 The two methods are:
@@ -255,7 +281,7 @@ The two methods are:
 - If a website is known to be a Single Page Application (SPA), it is always "dynamic".
 - If you are unsure, err on the side of caution. **Recommending "dynamic" is the safer choice** because a dynamic scraper can handle a static site, but a static scraper will fail on a dynamic site.
 
-Analyze the website at this URL: ${analysisUrl}
+Analyze the website at this URL: ${encodedAnalysisUrl}
 
 Based on this analysis, decide which method is more appropriate.
 
@@ -328,10 +354,10 @@ Respond with a JSON object with two keys:
     if (!validateUrlConfig()) return;
     
     if (useProxy) {
-      setStep(2); // Go to proxy step
+      setStep(2);
     } else {
       handleGenerateDynamicCode('');
-      setStep(2); // Go to Selenium script step
+      setStep(2);
     }
   };
   
@@ -342,9 +368,9 @@ Respond with a JSON object with two keys:
           return;
       }
       if (useProxy) {
-        setStep(2); // Go to proxy step
+        setStep(2);
       } else {
-        setStep(2); // Go to extractor step
+        setStep(2);
       }
   }
 
@@ -355,7 +381,7 @@ Respond with a JSON object with two keys:
     }
     setError('');
     handleGenerateDynamicCode(proxyList);
-    setStep(3); // Go to script step
+    setStep(3);
   };
 
   const handleProxyFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -427,6 +453,20 @@ Respond with a JSON object with two keys:
     setContainerTestResult(null);
     setContainerSet(false);
     setExtractionMethod(null);
+    if (scrapingMode === 'links') setExtractedLinks([]);
+  }, [scrapingMode]);
+
+  const handleLinkContainerChange = useCallback((field: 'tag' | 'attrs', value: string) => {
+      setLinkContainer(prev => ({ ...prev, [field]: value }));
+      setLinkContainerTestResult(null);
+      setLinkContainerSet(false);
+      setExtractedLinks([]);
+  }, []);
+
+  const handleLinkSelectorChange = useCallback((field: 'tag' | 'attrs', value: string) => {
+      setLinkSelector(prev => ({ ...prev, [field]: value }));
+      setLinkSelectorTestResult(null);
+      setExtractedLinks([]);
   }, []);
   
   const handleModeChange = (mode: ScrapingMode) => {
@@ -438,6 +478,15 @@ Respond with a JSON object with two keys:
       setExtractors([{ id: Date.now(), name: 'item_1', tag: '', attrs: '' }]);
       setTestResults({});
       setError('');
+      if (mode === 'links') {
+        setExtractedLinks([]);
+        setLinkExtractionStrategy('all');
+        setLinkContainer({ tag: '', attrs: '' });
+        setLinkSelector({ tag: 'a', attrs: '' });
+        setLinkContainerTestResult(null);
+        setLinkSelectorTestResult(null);
+        setLinkContainerSet(false);
+      }
   }
 
   const handleGenerateBsCode = () => {
@@ -447,9 +496,11 @@ Respond with a JSON object with two keys:
         if (extractors.length === 0 && extractionMethod !== 'auto') { setError('Please add at least one field to extract.'); return; }
         const invalidExtractor = extractors.find(e => !e.name.trim() || !e.tag.trim());
         if (invalidExtractor) { setError('Please fill in all field names and HTML tags for extraction.'); return; }
-    } else {
+    } else if (scrapingMode === 'simple') {
         const singleExtractor = extractors[0];
         if (!singleExtractor.name.trim() || !singleExtractor.tag.trim()) { setError('Please fill in the field name and HTML tag for extraction.'); return; }
+    } else if (scrapingMode === 'links') {
+        if (linkExtractionStrategy === 'container' && !isLinkContainerSet) { setError('Please define and successfully test a Card Container before generating the code.'); return; }
     }
     setStep(prev => prev + 1);
   };
@@ -460,36 +511,32 @@ Respond with a JSON object with two keys:
     setContainerSet(false);
     setContainerTestResult(null);
     setExtractionMethod(null);
+    setLinkContainerSet(false);
+    setLinkContainerTestResult(null);
+    setLinkSelectorTestResult(null);
 
     if (step > 1) {
       setStep(prevStep => prevStep - 1);
     } else if (scrapingType === 'static' && staticSource) {
       setStaticSource(null);
     } else if (scrapingType) {
-      setScrapingType(null); // Go back to method selection
+      setScrapingType(null);
     } else {
-      setCurrentView('advisor'); // Go back to advisor
+      setCurrentView('advisor');
     }
   };
 
   const convertToSelector = (t: string, a: string): string => {
     let selector = t.trim();
     if (!a.trim()) return selector;
-
-    // Regex to parse attributes: key="value" or key='value' or key=value
-    // Handles multiple attributes separated by commas or spaces.
     const attrsRegex = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
     let match;
-
     try {
         while ((match = attrsRegex.exec(a)) !== null) {
             const key = match[1].toLowerCase();
-            // match[2] is for double quotes, [3] for single, [4] for no quotes
             const value = match[2] ?? match[3] ?? match[4];
-
             if (key && typeof value !== 'undefined') {
                 if (key === 'id') {
-                    // Use the first part of the ID, in case it contains spaces (though invalid, browsers allow it)
                     selector += `#${value.split(/\s+/)[0]}`;
                 } else if (key === 'class') {
                     const classes = value.split(/\s+/).filter(Boolean).join('.');
@@ -505,30 +552,103 @@ Respond with a JSON object with two keys:
         return 'INVALID_SELECTOR_DUE_TO_ATTR_PARSE_ERROR';
     }
   };
+  
+  const getBaseUrl = () => {
+      try {
+          return new URL(url || (scrapingScope === 'multi' && urlPrefix) || 'http://localhost');
+      } catch (e) {
+          return new URL('http://localhost'); // fallback
+      }
+  };
 
-  const handleTest = useCallback((type: 'container' | 'extractor', id: number, tag: string, attrs: string) => {
+  const handleFindAllLinksPreview = useCallback(() => {
+    const iframeDoc = iframeRef.current?.contentDocument;
+    if (!iframeDoc) { setError("Cannot find HTML preview."); return; }
+    
+    const base = getBaseUrl();
+    const anchors = Array.from(iframeDoc.querySelectorAll('a[href]'));
+    
+    if (anchors.length === 0) { setExtractedLinks([]); return; }
+
+    const results = anchors.map(anchor => {
+        const anchorEl = anchor as HTMLAnchorElement;
+        const text = anchorEl.innerText.trim().replace(/\s\s+/g, ' ');
+        let href = '';
+        try {
+            href = new URL(anchorEl.getAttribute('href') || '', base.href).href;
+        } catch(e) {
+            console.warn(`Could not parse href: ${anchorEl.getAttribute('href')}`);
+            href = anchorEl.getAttribute('href') || '';
+        }
+        return { text, href, selected: true };
+    });
+    setExtractedLinks(results);
+  }, [url, urlPrefix, scrapingScope]);
+
+  const handleFindLinksInContainerPreview = useCallback(() => {
+      const iframeDoc = iframeRef.current?.contentDocument;
+      if (!iframeDoc) { setError("Cannot find HTML preview."); return; }
+
+      const containerSelector = convertToSelector(linkContainer.tag, linkContainer.attrs);
+      const linkSel = convertToSelector(linkSelector.tag, linkSelector.attrs);
+      if (!containerSelector || !linkSel) { setError("Container or Link selector is invalid."); return; }
+
+      const base = getBaseUrl();
+      const containers = iframeDoc.querySelectorAll(containerSelector);
+      const results: { text: string; href: string; selected: boolean }[] = [];
+
+      containers.forEach(c => {
+          const anchor = c.querySelector(linkSel);
+          if (anchor && anchor.getAttribute('href')) {
+              const anchorEl = anchor as HTMLAnchorElement;
+              const text = anchorEl.innerText.trim().replace(/\s\s+/g, ' ');
+              let href = '';
+              try {
+                  href = new URL(anchorEl.getAttribute('href') || '', base.href).href;
+              } catch (e) {
+                  console.warn(`Could not parse href: ${anchorEl.getAttribute('href')}`);
+                  href = anchorEl.getAttribute('href') || '';
+              }
+              results.push({ text, href, selected: true });
+          }
+      });
+      setExtractedLinks(results);
+  }, [url, urlPrefix, scrapingScope, linkContainer, linkSelector]);
+
+  const handleTest = useCallback((type: 'container' | 'extractor' | 'linkContainer' | 'linkSelector', id: number | null, tag: string, attrs: string) => {
       const iframeDoc = iframeRef.current?.contentDocument;
       if (!tag.trim() || !iframeDoc) {
           const result = { count: 0, preview: 'HTML Tag is empty.', error: true };
-          if(type === 'container') { setContainerTestResult(result); setContainerSet(false); }
-          else setTestResults(prev => ({ ...prev, [id]: result }));
+          if (type === 'container') { setContainerTestResult(result); setContainerSet(false); }
+          else if (type === 'linkContainer') { setLinkContainerTestResult(result); setLinkContainerSet(false); }
+          else if (type === 'extractor' && id) setTestResults(prev => ({ ...prev, [id]: result }));
           return;
       }
       
       const selector = convertToSelector(tag, attrs);
       try {
-          if (type === 'container') {
+          if (type === 'container' || type === 'linkContainer') {
               const matches = iframeDoc.querySelectorAll(selector);
               const count = matches.length;
               const isSuccess = count > 0;
-              setContainerTestResult({ count, preview: `Found ${count} repeating container elements.`, error: !isSuccess });
-              setContainerSet(isSuccess);
-              if (!isSuccess) setExtractionMethod(null);
-          } else {
+              const result = { count, preview: `Found ${count} repeating container elements.`, error: !isSuccess };
+              if (type === 'container') { setContainerTestResult(result); setContainerSet(isSuccess); if (!isSuccess) setExtractionMethod(null); }
+              else { setLinkContainerTestResult(result); setLinkContainerSet(isSuccess); }
+          } else if (type === 'linkSelector') {
+              const containerSel = convertToSelector(linkContainer.tag, linkContainer.attrs);
+              const containers = iframeDoc.querySelectorAll(containerSel);
+              if (containers.length > 0) {
+                  // FIX: Explicitly type 'c' as Element to resolve type inference issue.
+                  const matchesInContainers = Array.from(containers).filter((c: Element) => c.querySelector(selector));
+                  const count = matchesInContainers.length;
+                  setLinkSelectorTestResult({ count, preview: `${count} of ${containers.length} containers have a link match.`, error: count === 0 });
+              } else { setLinkSelectorTestResult({ count: 0, preview: 'No card containers found to test within.', error: true }); }
+          } else if (type === 'extractor' && id) {
              if (scrapingMode === 'structured' && container.tag) {
                    const containerSelector = convertToSelector(container.tag, container.attrs);
                    const containers = iframeDoc.querySelectorAll(containerSelector);
                    if (containers.length > 0) {
+                     // FIX: Explicitly type 'c' as Element to resolve type inference issue.
                      const matchesInContainers = Array.from(containers).filter((c: Element) => c.querySelector(selector));
                      const count = matchesInContainers.length;
                      setTestResults(prev => ({ ...prev, [id]: { count, preview: `${count} of ${containers.length} containers have a match.`, error: count === 0 }}));
@@ -536,45 +656,42 @@ Respond with a JSON object with two keys:
               } else {
                   const matches = iframeDoc.querySelectorAll(selector);
                   const count = matches.length;
-                  const preview = `Found ${count} total matches. Preview: ` + Array.from(matches).slice(0, 3).map((el: Element) => (el.textContent || '').trim().slice(0, 20).concat('...')).join(' | ');
+                  const preview = `Found ${count} total matches. Preview: ` + Array.from(matches).slice(0, 3).map((el) => ((el as HTMLElement).textContent || '').trim().slice(0, 20).concat('...')).join(' | ');
                   setTestResults(prev => ({ ...prev, [id]: { count, preview: preview || `Found ${count} matches. (No text content)`, error: count === 0 } }));
               }
           }
       } catch (e) {
           const result = { count: 0, preview: 'Invalid Tag or Attributes for testing.', error: true };
-           if(type === 'container') { setContainerTestResult(result); setContainerSet(false); setExtractionMethod(null); }
-          else setTestResults(prev => ({ ...prev, [id]: result }));
+          if (type === 'container') { setContainerTestResult(result); setContainerSet(false); setExtractionMethod(null); }
+          else if (type === 'linkContainer') { setLinkContainerTestResult(result); setLinkContainerSet(false); }
+          else if (type === 'linkSelector') { setLinkSelectorTestResult(result); }
+          else if (type === 'extractor' && id) setTestResults(prev => ({ ...prev, [id]: result }));
       }
-  }, [container, scrapingMode]);
+  }, [container, scrapingMode, linkContainer]);
 
   const generateExtractorDetails = (el: HTMLElement): { tag: string; attrs: string } => {
     const tag = el.tagName.toLowerCase();
     
-    // 1. Prioritize ID if it exists and seems stable
     if (el.id && !/^\d+$/.test(el.id)) {
         return { tag, attrs: `id=${el.id}` };
     }
 
     const attrsArray: string[] = [];
     
-    // 2. Use class if it exists and is not empty
     if (el.className && typeof el.className === 'string' && el.className.trim()) {
         attrsArray.push(`class="${el.className.trim()}"`);
     }
 
-    // 3. Fallback to other meaningful attributes if no class and no ID was used
     if (attrsArray.length === 0) {
         for (let i = 0; i < el.attributes.length; i++) {
             const attr = el.attributes[i];
             const name = attr.name.toLowerCase();
             const value = attr.value;
 
-            // Ignore irrelevant or unstable attributes
             if (!value || ['id', 'class', 'style'].includes(name) || name.startsWith('on')) {
                 continue;
             }
             
-            // Only consider attributes that are good for selection
             if (['href', 'src', 'alt', 'title', 'role', 'type', 'name'].some(p => name.startsWith(p)) || name.startsWith('data-')) {
                  attrsArray.push(`${name}="${value}"`);
             }
@@ -590,7 +707,8 @@ Respond with a JSON object with two keys:
     setAutoDetectUrlLoading(true);
     try {
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `Given the URL: "${url}". Find the page number in it. Replace that number with the placeholder "{page}". Return only the modified URL.`;
+      const encodedUrl = encodeURI(url);
+      const prompt = `Given the URL: "${encodedUrl}". Find the page number in it. Replace that number with the placeholder "{page}". Return only the modified URL.`;
       const response = await ai.models.generateContent({ model: 'gemini-2.5-flash', contents: prompt });
       const pattern = response.text.trim();
       const placeholder = '{page}';
@@ -647,6 +765,34 @@ Respond with a JSON object with two keys:
     } catch (e) { console.error('Error auto-detecting fields with AI:', e); setError('An error occurred during AI field detection. Please try adding fields manually.');
     } finally { setAutoFieldDetectLoading(false); }
   };
+  
+  const handleAiLinkFilter = async () => {
+    if (!aiLinkFilterPrompt.trim() || extractedLinks.length === 0) {
+        setError("Please enter a filter instruction and ensure links have been extracted.");
+        return;
+    }
+    setError('');
+    setAiLinkFilterLoading(true);
+
+    try {
+        const ai = new GoogleGenAI({ apiKey });
+        const linksToProcess = extractedLinks.map(({ text, href }) => ({ text, href }));
+        const prompt = `You are an intelligent web scraping assistant. Your task is to filter a list of links based on a user's natural language request. The user will provide a list of links, each with 'text' and 'href' properties. You must analyze the user's request and the links, and then return a JSON array containing only the 'href' values of the links that should remain selected. Only include hrefs from the original list.
+
+User request: "${aiLinkFilterPrompt}"
+Links: ${JSON.stringify(linksToProcess)}
+`;
+        const response = await ai.models.generateContent({
+            model: 'gemini-2.5-flash', contents: prompt, config: { responseMimeType: "application/json", responseSchema: { type: Type.ARRAY, items: { type: Type.STRING } } } });
+        const selectedHrefs = new Set(JSON.parse(response.text.trim()));
+        setExtractedLinks(prevLinks => prevLinks.map(link => ({ ...link, selected: selectedHrefs.has(link.href) })));
+    } catch (e) {
+        console.error("Error filtering links with AI:", e);
+        setError("An error occurred during AI filtering. Please try again or refine your instruction.");
+    } finally {
+        setAiLinkFilterLoading(false);
+    }
+  };
 
   const handleMultiPageModeChange = (mode: MultiPageMode) => {
     setMultiPageMode(mode);
@@ -655,27 +801,96 @@ Respond with a JSON object with two keys:
     setUrlPrefix('');
     setUrlSuffix('');
   };
+  
+    const handleToggleLinkSelection = (index: number) => {
+        setExtractedLinks(prev => prev.map((link, i) => i === index ? { ...link, selected: !link.selected } : link));
+    };
+
+    const handleToggleSelectAll = (event: React.ChangeEvent<HTMLInputElement>) => {
+        const isSelected = event.target.checked;
+        setExtractedLinks(prev => prev.map(link => ({ ...link, selected: isSelected })));
+    };
+
+    const handleExportLinks = (format: 'csv' | 'json') => {
+        const selected = extractedLinks.filter(link => link.selected);
+        if (selected.length === 0) {
+            setError('Please select at least one link to export.');
+            return;
+        }
+        setError('');
+
+        const dataToExport = selected.map(({ text, href }) => ({ text, href }));
+        let fileContent = '';
+        let mimeType = '';
+        let fileName = '';
+
+        if (format === 'csv') {
+            const header = '"Link Text","URL"\n';
+            const rows = dataToExport.map(l => `"${(l.text || '').replace(/"/g, '""')}","${l.href}"`).join('\n');
+            fileContent = header + rows;
+            mimeType = 'text/csv;charset=utf-8;';
+            fileName = 'links.csv';
+        } else {
+            fileContent = JSON.stringify(dataToExport, null, 2);
+            mimeType = 'application/json;charset=utf-8;';
+            fileName = 'links.json';
+        }
+
+        const blob = new Blob([fileContent], { type: mimeType });
+        const link = document.createElement('a');
+        if (link.href) {
+            URL.revokeObjectURL(link.href);
+        }
+        link.href = URL.createObjectURL(blob);
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+    };
 
   useEffect(() => {
     const iframe = iframeRef.current;
     const iframeDoc = iframe?.contentDocument;
     if (!iframeDoc || selectingFor === null) return;
-    const handleMouseOver = (e: MouseEvent) => { (e.target as HTMLElement).style.outline = '2px solid #fff'; (e.target as HTMLElement).style.cursor = 'pointer'; };
-    const handleMouseOut = (e: MouseEvent) => { (e.target as HTMLElement).style.outline = ''; (e.target as HTMLElement).style.cursor = ''; };
+    
+    const handleMouseOver = (e: MouseEvent) => { 
+      const target = e.target as HTMLElement;
+      target.style.outline = '2px solid #0ea5e9'; // sky-500
+      target.style.boxShadow = '0 0 0 3px rgba(14, 165, 233, 0.4)';
+      target.style.cursor = 'crosshair';
+    };
+    const handleMouseOut = (e: MouseEvent) => { 
+      const target = e.target as HTMLElement;
+      target.style.outline = '';
+      target.style.boxShadow = '';
+      target.style.cursor = '';
+    };
     const handleClick = (e: MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
       const target = e.target as HTMLElement;
       if (target && selectingFor !== null) {
         target.style.outline = '';
+        target.style.boxShadow = '';
+
         const originalBg = target.style.backgroundColor;
-        target.style.backgroundColor = '#3f3f46'; // zinc-700
-        setTimeout(() => { target.style.backgroundColor = originalBg; }, 300);
+        target.style.backgroundColor = '#0ea5e9';
+        target.style.transition = 'background-color 0.1s ease';
+        setTimeout(() => { target.style.backgroundColor = originalBg; }, 200);
+
         const { tag, attrs } = generateExtractorDetails(target);
         if (selectingFor === 'container') {
           handleContainerChange('tag', tag);
           handleContainerChange('attrs', attrs);
-          setTimeout(() => handleTest('container', 0, tag, attrs), 0);
+          setTimeout(() => handleTest('container', null, tag, attrs), 0);
+        } else if (selectingFor === 'linkContainer') {
+            handleLinkContainerChange('tag', tag);
+            handleLinkContainerChange('attrs', attrs);
+            setTimeout(() => handleTest('linkContainer', null, tag, attrs), 0);
+        } else if (selectingFor === 'linkSelector') {
+            handleLinkSelectorChange('tag', tag);
+            handleLinkSelectorChange('attrs', attrs);
+            setTimeout(() => handleTest('linkSelector', null, tag, attrs), 0);
         } else {
           handleExtractorChange(selectingFor, 'tag', tag);
           handleExtractorChange(selectingFor, 'attrs', attrs);
@@ -687,15 +902,21 @@ Respond with a JSON object with two keys:
     iframeDoc.addEventListener('mouseover', handleMouseOver);
     iframeDoc.addEventListener('mouseout', handleMouseOut);
     iframeDoc.addEventListener('click', handleClick, true);
+    
     return () => {
+      const previouslyHovered = iframeDoc.querySelector('[style*="outline"]');
+      if (previouslyHovered) {
+          (previouslyHovered as HTMLElement).style.outline = '';
+          (previouslyHovered as HTMLElement).style.boxShadow = '';
+          (previouslyHovered as HTMLElement).style.cursor = '';
+      }
       iframeDoc.removeEventListener('mouseover', handleMouseOver);
       iframeDoc.removeEventListener('mouseout', handleMouseOut);
       iframeDoc.removeEventListener('click', handleClick, true);
     };
-  }, [selectingFor, handleExtractorChange, handleContainerChange, handleTest]);
+  }, [selectingFor, handleExtractorChange, handleContainerChange, handleTest, handleLinkContainerChange, handleLinkSelectorChange]);
   
   useEffect(() => {
-    // Determine if we are on the final step for any flow
     const isDynamicFinal = scrapingType === 'dynamic' && step === (useProxy ? 6 : 5);
     const isStaticUrlFinal = scrapingType === 'static' && staticSource === 'url' && step === (useProxy ? 4 : 3);
     const isStaticFileFinal = scrapingType === 'static' && staticSource === 'file' && step === 3;
@@ -708,7 +929,9 @@ Respond with a JSON object with two keys:
         extractors, 
         outputFormat,
         source: (scrapingType === 'static' && staticSource === 'url') ? 'live-url' : 'local-files',
-        // --- URL-specific params ---
+        linkExtractionStrategy,
+        linkContainer,
+        linkSelector,
         url: scrapingScope === 'single' ? url : '',
         urlPrefix: scrapingScope === 'multi' ? urlPrefix : '',
         urlSuffix: scrapingScope === 'multi' ? urlSuffix : '',
@@ -718,7 +941,21 @@ Respond with a JSON object with two keys:
       });
       setBsCode(code);
     }
-  }, [outputFormat, step, extractors, container, scrapingMode, projectName, scrapingScope, startPage, numPages, scrapingType, useProxy, url, urlPrefix, urlSuffix, proxyList, delay, browser, staticSource]);
+  }, [outputFormat, step, extractors, container, scrapingMode, projectName, scrapingScope, url, urlPrefix, urlSuffix, proxyList, delay, browser, staticSource, linkExtractionStrategy, linkContainer, linkSelector, useProxy, isContainerSet, isLinkContainerSet]);
+
+  // Handle automatic link preview for the "All Links" strategy
+  useEffect(() => {
+    if (scrapingMode === 'links' && htmlContents.length > 0 && linkExtractionStrategy === 'all') {
+      handleFindAllLinksPreview();
+    }
+  }, [scrapingMode, htmlContents, handleFindAllLinksPreview, linkExtractionStrategy]);
+
+  // Handle automatic link preview for the "Links from Cards" strategy
+  useEffect(() => {
+    if (scrapingMode === 'links' && linkExtractionStrategy === 'container' && isLinkContainerSet) {
+        handleFindLinksInContainerPreview();
+    }
+  }, [scrapingMode, linkExtractionStrategy, isLinkContainerSet, linkContainer, linkSelector, handleFindLinksInContainerPreview]);
 
   let steps: string[] = [];
   if (scrapingType === 'dynamic') {
@@ -737,24 +974,74 @@ Respond with a JSON object with two keys:
   const renderExtractorUI = (currentStep: number) => {
     const singleExtractor = extractors[0];
     const singleTestResult = testResults[singleExtractor.id];
+    const selectedLinksCount = extractedLinks.filter(l => l.selected).length;
+    const allLinksSelected = extractedLinks.length > 0 && selectedLinksCount === extractedLinks.length;
+
+    const generateCodeDisabled = (scrapingMode === 'structured' && (!isContainerSet || !container.tag)) || (scrapingMode === 'links' && linkExtractionStrategy === 'container' && !isLinkContainerSet);
+
     return (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 h-[75vh]">
             <div className="flex flex-col"><h2 className="text-xl font-semibold text-zinc-100 mb-2">HTML Preview</h2><div className="flex-grow border border-zinc-700 rounded-lg overflow-hidden relative shadow-inner bg-white">{selectingFor !== null && ( <div className="absolute inset-x-0 top-0 bg-white text-black text-center text-sm py-1 z-10 animate-pulse">Selection Mode Active</div> )}<iframe ref={iframeRef} srcDoc={htmlContents[0]?.content || ''} title="HTML Preview" className="w-full h-full" sandbox="allow-same-origin"/></div></div>
             <div className="flex flex-col"><div className="space-y-6 flex-grow overflow-y-auto pr-2 -mr-2">
-            <div><h3 className="text-lg font-semibold text-zinc-100">Step {currentStep}: Define What to Extract</h3><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${scrapingMode === 'structured' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Extract Structured Data</span><span className="text-sm text-zinc-400 mt-1">Multiple fields from repeating items.</span><input type="radio" name="scraping-mode" value="structured" checked={scrapingMode === 'structured'} onChange={() => handleModeChange('structured')} className="absolute h-full w-full opacity-0" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${scrapingMode === 'simple' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Extract a Simple List</span><span className="text-sm text-zinc-400 mt-1">A single list of all matching items.</span><input type="radio" name="scraping-mode" value="simple" checked={scrapingMode === 'simple'} onChange={() => handleModeChange('simple')} className="absolute h-full w-full opacity-0" /></label></fieldset></div>
-            {scrapingMode === 'structured' ? (<>
-                <div><h3 className="text-base font-semibold text-zinc-300">Define Container</h3><div className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-2 mt-2"><div className="flex items-center gap-2"><input type="text" value={container.tag} onChange={(e) => handleContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(selectingFor === 'container' ? null : 'container')} className={`p-2 rounded-md transition-colors ${selectingFor === 'container' ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select container"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('container', 0, container.tag, container.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test container"><PlayIcon /></button></div><textarea value={container.attrs} onChange={(e) => handleContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=quote)" rows={1} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
+            <div><h3 className="text-lg font-semibold text-zinc-100">Step {currentStep}: Define What to Extract</h3><fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-4"><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${scrapingMode === 'structured' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Extract Structured Data</span><span className="text-sm text-zinc-400 mt-1">Multiple fields from repeating items.</span><input type="radio" name="scraping-mode" value="structured" checked={scrapingMode === 'structured'} onChange={() => handleModeChange('structured')} className="absolute h-full w-full opacity-0" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${scrapingMode === 'links' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Extract Links</span><span className="text-sm text-zinc-400 mt-1">Find hyperlinks from the page.</span><input type="radio" name="scraping-mode" value="links" checked={scrapingMode === 'links'} onChange={() => handleModeChange('links')} className="absolute h-full w-full opacity-0" /></label><label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${scrapingMode === 'simple' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Extract a Simple List</span><span className="text-sm text-zinc-400 mt-1">A single list of all matching items.</span><input type="radio" name="scraping-mode" value="simple" checked={scrapingMode === 'simple'} onChange={() => handleModeChange('simple')} className="absolute h-full w-full opacity-0" /></label></fieldset></div>
+            
+            {scrapingMode === 'structured' && (<>
+                <div><h3 className="text-base font-semibold text-zinc-300">Define Container</h3><p className="text-xs text-zinc-500 mb-2">Specify the repeating element that contains the data you want to extract.</p><div className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-2 mt-2"><div className="flex items-center gap-2"><input type="text" value={container.tag} onChange={(e) => handleContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(selectingFor === 'container' ? null : 'container')} className={`p-2 rounded-md transition-colors ${selectingFor === 'container' ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select container"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('container', null, container.tag, container.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test container"><PlayIcon /></button></div><textarea value={container.attrs} onChange={(e) => handleContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=quote)" rows={1} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
                 {containerTestResult && (<div className={`p-2 text-xs rounded-md border flex items-center gap-2 bg-zinc-900 border-zinc-800`}><div className={containerTestResult.error ? 'text-zinc-500' : 'text-white'}>{containerTestResult.error ? <XCircleIcon /> : <CheckCircleIcon />}</div><p className="text-zinc-300">{containerTestResult.preview}</p></div>)}</div></div>
-                {isContainerSet && extractionMethod === null && (<div className="p-4 border-2 border-dashed border-zinc-700 bg-zinc-900/50 rounded-lg"><h3 className="text-base font-semibold text-zinc-300">Define Fields to Extract</h3><div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3"><button onClick={handleAutoFieldDetect} disabled={autoFieldDetectLoading} className="w-full px-3 py-2 bg-zinc-700 text-zinc-100 font-semibold rounded-md hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-wait flex items-center justify-center transition-colors">{autoFieldDetectLoading ? 'Detecting...' : <><SparklesIcon /> Auto-detect Fields</>}</button><button onClick={() => setExtractionMethod('manual')} className="w-full px-3 py-2 bg-transparent font-semibold rounded-md border border-zinc-700 text-zinc-200 hover:bg-zinc-800 transition-colors">Add Fields Manually</button></div></div>)}
+                {isContainerSet && extractionMethod === null && (<div className="p-4 border-2 border-dashed border-zinc-700 bg-zinc-900/50 rounded-lg"><h3 className="text-base font-semibold text-zinc-300">Define Fields to Extract</h3><div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3"><button onClick={handleAutoFieldDetect} disabled={autoFieldDetectLoading} className="w-full px-3 py-2 bg-zinc-700 text-zinc-100 font-semibold rounded-md hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:cursor-wait flex items-center justify-center transition-colors">{autoFieldDetectLoading ? 'Detecting...' : <><SparklesIcon className="mr-2" /> Auto-detect Fields</>}</button><button onClick={() => setExtractionMethod('manual')} className="w-full px-3 py-2 bg-transparent font-semibold rounded-md border border-zinc-700 text-zinc-200 hover:bg-zinc-800 transition-colors">Add Fields Manually</button></div></div>)}
                 {isContainerSet && extractionMethod === 'manual' && (<div><h3 className="text-base font-semibold text-zinc-300">Define Fields to Extract</h3><div className="space-y-4">{extractors.map((extractor, index) => {const testResult = testResults[extractor.id];return (<div key={extractor.id} className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg"><div className="flex justify-between items-center mb-2"><label className="block text-sm font-medium text-zinc-300">Field #{index + 1}</label><button onClick={() => handleRemoveExtractor(extractor.id)} disabled={extractors.length <= 1} className="text-zinc-500 hover:text-zinc-300 disabled:text-zinc-700" aria-label="Remove"><TrashIcon /></button></div><div className="grid grid-cols-1 gap-4"><input type="text" value={extractor.name} onChange={(e) => handleExtractorChange(extractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name" className="w-full px-3 py-2 border border-zinc-700 rounded-md text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><div className="flex items-center gap-2"><input type="text" value={extractor.tag} onChange={(e) => handleExtractorChange(extractor.id, 'tag', e.target.value)} placeholder="HTML Tag" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(extractor.id === selectingFor ? null : extractor.id)} className={`p-2 rounded-md transition-colors ${selectingFor === extractor.id ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', extractor.id, extractor.tag, extractor.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test field"><PlayIcon /></button></div><textarea value={extractor.attrs} onChange={(e) => handleExtractorChange(extractor.id, 'attrs', e.target.value)} placeholder="Attributes" rows={2} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
                 {testResult && (<div className={`mt-2 p-2 text-xs rounded-md border flex items-center gap-2 bg-zinc-900 border-zinc-800`}><div className={testResult.error ? 'text-zinc-500' : 'text-white'}>{testResult.error ? <XCircleIcon /> : <CheckCircleIcon />}</div><p className="text-zinc-300">{testResult.preview}</p></div>)}</div></div>);})}</div><button onClick={handleAddExtractor} className="mt-4 flex items-center justify-center w-full bg-zinc-800 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-700 transition-colors"><PlusIcon />Add Field</button></div>)}</>
-            ) : (
+            )}
+
+            {scrapingMode === 'links' && (
+                <div className="space-y-4">
+                    <div>
+                        <h3 className="text-base font-semibold text-zinc-300">Link Extraction Strategy</h3>
+                        <fieldset className="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-2">
+                            <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${linkExtractionStrategy === 'all' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">All Links on Page</span><input type="radio" name="link-strategy" value="all" checked={linkExtractionStrategy === 'all'} onChange={() => setLinkExtractionStrategy('all')} className="absolute h-full w-full opacity-0" /></label>
+                            <label className={`relative flex flex-col p-4 border rounded-lg cursor-pointer transition-all ${linkExtractionStrategy === 'container' ? 'border-white bg-zinc-900 ring-2 ring-white' : 'border-zinc-700 bg-transparent hover:bg-zinc-900'}`}><span className="font-semibold text-zinc-100">Links from Cards</span><input type="radio" name="link-strategy" value="container" checked={linkExtractionStrategy === 'container'} onChange={() => setLinkExtractionStrategy('container')} className="absolute h-full w-full opacity-0" /></label>
+                        </fieldset>
+                    </div>
+
+                    {linkExtractionStrategy === 'container' && (
+                        <div className="space-y-4">
+                            <div><h3 className="text-base font-semibold text-zinc-300">Define Card Container</h3><p className="text-xs text-zinc-500 mb-2">The repeating element containing the link.</p><div className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-2"><div className="flex items-center gap-2"><input type="text" value={linkContainer.tag} onChange={(e) => handleLinkContainerChange('tag', e.target.value)} placeholder="HTML Tag (e.g., div)" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(selectingFor === 'linkContainer' ? null : 'linkContainer')} className={`p-2 rounded-md transition-colors ${selectingFor === 'linkContainer' ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select card container"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('linkContainer', null, linkContainer.tag, linkContainer.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test card container"><PlayIcon /></button></div><textarea value={linkContainer.attrs} onChange={(e) => handleLinkContainerChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=product)" rows={1} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
+                            {linkContainerTestResult && (<div className={`p-2 text-xs rounded-md border flex items-center gap-2 bg-zinc-900 border-zinc-800`}><div className={linkContainerTestResult.error ? 'text-zinc-500' : 'text-white'}>{linkContainerTestResult.error ? <XCircleIcon /> : <CheckCircleIcon />}</div><p className="text-zinc-300">{linkContainerTestResult.preview}</p></div>)}</div></div>
+                            
+                            {isLinkContainerSet && <div><h3 className="text-base font-semibold text-zinc-300">Define Link Element (within card)</h3><p className="text-xs text-zinc-500 mb-2">The specific link inside the container.</p><div className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-2"><div className="flex items-center gap-2"><input type="text" value={linkSelector.tag} onChange={(e) => handleLinkSelectorChange('tag', e.target.value)} placeholder="HTML Tag (e.g., a)" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(selectingFor === 'linkSelector' ? null : 'linkSelector')} className={`p-2 rounded-md transition-colors ${selectingFor === 'linkSelector' ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select link element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('linkSelector', null, linkSelector.tag, linkSelector.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test link element"><PlayIcon /></button></div><textarea value={linkSelector.attrs} onChange={(e) => handleLinkSelectorChange('attrs', e.target.value)} placeholder="Attributes (e.g., class=product-link)" rows={1} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
+                            {linkSelectorTestResult && (<div className={`p-2 text-xs rounded-md border flex items-center gap-2 bg-zinc-900 border-zinc-800`}><div className={linkSelectorTestResult.error ? 'text-zinc-500' : 'text-white'}>{linkSelectorTestResult.error ? <XCircleIcon /> : <CheckCircleIcon />}</div><p className="text-zinc-300">{linkSelectorTestResult.preview}</p></div>)}</div></div>}
+                        </div>
+                    )}
+
+                    {extractedLinks.length > 0 ? (
+                        <div className="p-3 bg-zinc-900/50 border border-zinc-800 rounded-lg space-y-3">
+                            <div className="space-y-2 pb-3 border-b border-zinc-700"><label htmlFor="ai-link-filter" className="text-sm font-medium text-zinc-300 flex items-center gap-2"><SparklesIcon /> AI-Powered Filtering</label><div className="flex flex-col sm:flex-row gap-2"><input id="ai-link-filter" type="text" value={aiLinkFilterPrompt} onChange={(e) => setAiLinkFilterPrompt(e.target.value)} placeholder="e.g., keep only links to user profiles" className="flex-grow w-full px-3 py-1.5 border border-zinc-700 rounded-md font-sans text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" disabled={aiLinkFilterLoading} /><button onClick={handleAiLinkFilter} disabled={aiLinkFilterLoading || !aiLinkFilterPrompt.trim()} className="w-full sm:w-auto text-sm bg-zinc-700 text-zinc-100 font-semibold py-1.5 px-3 rounded-md hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 transition-colors flex items-center justify-center">{aiLinkFilterLoading ? (<><svg className="animate-spin -ml-1 mr-2 h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>Filtering...</>) : ('Apply Filter')}</button></div></div>
+                            <div className="flex justify-between items-center text-sm"><label className="flex items-center gap-2 font-medium text-zinc-200"><input type="checkbox" checked={allLinksSelected} onChange={handleToggleSelectAll} className="h-4 w-4 rounded bg-zinc-800 border-zinc-600 text-white focus:ring-white" />Select All</label><span className="text-zinc-400">{selectedLinksCount} / {extractedLinks.length} selected</span></div>
+                            <div className="max-h-60 overflow-y-auto border border-zinc-700 rounded-md p-1 space-y-1">{extractedLinks.map((link, index) => (<div key={index} className="p-1.5 rounded hover:bg-zinc-800"><label className="flex items-start cursor-pointer gap-2"><input type="checkbox" checked={link.selected} onChange={() => handleToggleLinkSelection(index)} className="h-4 w-4 rounded bg-zinc-800 border-zinc-600 text-white focus:ring-white mt-1" /><div className="text-sm overflow-hidden flex-1"><p className="font-medium text-zinc-200 line-clamp-2" title={link.text}>{link.text || '[No Text]'}</p><p className="text-zinc-400 truncate" title={link.href}>{link.href || '[No URL]'}</p></div></label></div>))}</div>
+                            <div className="flex flex-col sm:flex-row gap-3 pt-3 border-t border-zinc-700"><button onClick={() => handleExportLinks('csv')} disabled={selectedLinksCount === 0} className="w-full text-sm bg-zinc-700 text-zinc-100 font-semibold py-2 px-3 rounded-md hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 transition-colors">Export as CSV</button><button onClick={() => handleExportLinks('json')} disabled={selectedLinksCount === 0} className="w-full text-sm bg-zinc-700 text-zinc-100 font-semibold py-2 px-3 rounded-md hover:bg-zinc-600 disabled:bg-zinc-800 disabled:text-zinc-500 transition-colors">Export as JSON</button></div>
+                        </div>
+                    ) : (
+                        <p className="text-sm text-zinc-400 p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg">{linkExtractionStrategy === 'all' ? 'No links found in the sample HTML file. The script will find all links when run.' : 'No links found with the current selectors.'}</p>
+                    )}
+                </div>
+            )}
+            
+            {scrapingMode === 'simple' && (
                 <div><h3 className="text-base font-semibold text-zinc-300">Define Field to Extract</h3><div className="p-4 bg-zinc-900/50 border border-zinc-800 rounded-lg"><div className="grid grid-cols-1 gap-4"><input type="text" value={singleExtractor.name} onChange={(e) => handleExtractorChange(singleExtractor.id, 'name', e.target.value.replace(/[^a-zA-Z0-9_]/g, '_'))} placeholder="Variable Name" className="w-full px-3 py-2 border border-zinc-700 rounded-md text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><div className="flex items-center gap-2"><input type="text" value={singleExtractor.tag} onChange={(e) => handleExtractorChange(singleExtractor.id, 'tag', e.target.value)} placeholder="HTML Tag" className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" /><button onClick={() => setSelectingFor(singleExtractor.id === selectingFor ? null : singleExtractor.id)} className={`p-2 rounded-md transition-colors ${selectingFor === singleExtractor.id ? 'bg-white text-black' : 'bg-zinc-700 hover:bg-zinc-600 text-white'}`} title="Select element"><CursorArrowRaysIcon /></button><button onClick={() => handleTest('extractor', singleExtractor.id, singleExtractor.tag, singleExtractor.attrs)} className="p-2 rounded-md bg-zinc-700 hover:bg-zinc-600 text-white" title="Test field"><PlayIcon /></button></div><textarea value={singleExtractor.attrs} onChange={(e) => handleExtractorChange(singleExtractor.id, 'attrs', e.target.value)} placeholder="Attributes" rows={2} className="w-full px-3 py-2 border border-zinc-700 rounded-md font-mono text-sm bg-zinc-900 text-zinc-200 focus:ring-1 focus:ring-white focus:border-white" />
                 {singleTestResult && (<div className={`mt-2 p-2 text-xs rounded-md border flex items-center gap-2 bg-zinc-900 border-zinc-800`}><div className={singleTestResult.error ? 'text-zinc-500' : 'text-white'}>{singleTestResult.error ? <XCircleIcon /> : <CheckCircleIcon />}</div><p className="text-zinc-300">{singleTestResult.preview}</p></div>)}</div></div></div>
             )}
             </div>
             {error && <p className="text-red-400 font-semibold text-sm mt-2">{error}</p>}
-            <div className="mt-2 flex flex-col sm:flex-row gap-3 pt-4 border-t border-zinc-800"><button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button><button onClick={handleGenerateBsCode} disabled={(scrapingMode === 'structured' && !isContainerSet) || htmlContents.length === 0} className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 disabled:bg-zinc-600 disabled:text-zinc-400 disabled:cursor-not-allowed transition-all" title={(scrapingMode === 'structured' && !isContainerSet) ? 'Define and test a container first' : ''}>Generate Scraper Code</button></div>
+            <div className="mt-2 flex flex-col sm:flex-row gap-3 pt-4 border-t border-zinc-800">
+              <button onClick={handleBack} className="w-full bg-transparent border border-zinc-600 text-zinc-300 font-semibold py-2 px-4 rounded-lg hover:bg-zinc-800 transition-colors">Back</button>
+              <button 
+                onClick={handleGenerateBsCode} 
+                disabled={htmlContents.length === 0 || generateCodeDisabled}
+                className="w-full bg-white text-black font-semibold py-2 px-4 rounded-lg hover:bg-zinc-200 disabled:bg-zinc-600 disabled:text-zinc-400 disabled:cursor-not-allowed transition-all" 
+                title={generateCodeDisabled ? 'Please define and test a container first' : ''}>
+                Generate Scraper Code
+              </button>
+            </div>
             </div>
         </div>
     );
@@ -829,7 +1116,7 @@ Respond with a JSON object with two keys:
 
         if (staticSource === 'file') {
              switch (step) {
-                case 1: // Upload local files
+                case 1:
                   return (<div><h2 className="text-2xl font-semibold text-zinc-100 mb-2">Step 1: Upload Local HTML Files</h2><p className="text-zinc-400 mb-4">Provide a project name and upload the HTML file(s) you want to extract data from.</p><div className="space-y-4">
                         <div><label htmlFor="project-name" className="block text-sm font-medium text-zinc-300">Project Folder Name</label><input id="project-name" type="text" value={projectName} onChange={(e) => setProjectName(e.target.value.replace(/[^a-zA-Z0-9_-]/g, ''))} placeholder="e.g., my_html_data" className="mt-1 w-full px-3 py-2 border border-zinc-700 rounded-md bg-zinc-900 text-zinc-200 focus:ring-2 focus:ring-white" /><p className="text-xs text-zinc-500 mt-1">The final script will look for your HTML files in this folder.</p></div>
                         <div><label className="block text-sm font-medium text-zinc-300">HTML File(s)</label><p className="text-xs text-zinc-500 mt-1 mb-2">Upload the HTML file to be used for the preview. The final script will process ALL .html files in the project folder.</p><div className="mt-2 flex justify-center rounded-lg border border-dashed border-zinc-700 px-6 py-4"><div className="text-center"><div className="flex text-sm leading-6 text-zinc-400"><label htmlFor="file-upload" className="relative cursor-pointer rounded-md font-semibold text-white hover:text-zinc-300"><span>{htmlContents.length > 0 ? `Selected: ${htmlContents[0].name}` : 'Upload a file for preview'}</span><input id="file-upload" type="file" className="sr-only" accept=".html" onChange={handleFileChange} /></label></div></div></div></div>

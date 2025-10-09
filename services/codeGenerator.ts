@@ -1,21 +1,42 @@
-import { type Extractor, type OutputFormat, type ScrapingMode, type ScrapingScope, type MultiPageMode, type Browser, type GenerateBsCodeParams } from '../types';
+import { type Extractor, type LinkExtractionStrategy } from '../types';
 
 interface GenerateDynamicCodeParams {
   url: string;
   projectName: string;
-  scrapingScope: ScrapingScope;
-  multiPageMode: MultiPageMode;
+  scrapingScope: 'single' | 'multi';
+  multiPageMode: 'button' | 'url';
   startPage: number;
   numPages: number;
   nextPageSelector: string;
-  browser: Browser;
+  browser: 'chrome' | 'firefox' | 'edge' | 'brave' | 'opera';
   delay: number;
   urlPrefix?: string;
   urlSuffix?: string;
   proxyList?: string;
 }
 
-const getDriverSetupCode = (browser: Browser, proxyListCleaned: string): string => {
+export interface GenerateBsCodeParams {
+    projectName: string;
+    scrapingMode: 'structured' | 'simple' | 'links';
+    container: Omit<Extractor, 'id' | 'name'>;
+    extractors: Extractor[];
+    outputFormat: 'csv' | 'json' | 'print';
+    source: 'live-url' | 'local-files';
+    // --- Optional params for links mode ---
+    linkExtractionStrategy?: LinkExtractionStrategy;
+    linkContainer?: Omit<Extractor, 'id' | 'name'>;
+    linkSelector?: Omit<Extractor, 'id' | 'name'>;
+    // --- Optional params for live-url source ---
+    url?: string;
+    urlPrefix?: string;
+    urlSuffix?: string;
+    proxyList?: string;
+    delay?: number;
+    browser?: 'chrome' | 'firefox' | 'edge' | 'brave' | 'opera';
+}
+
+
+const getDriverSetupCode = (browser: GenerateDynamicCodeParams['browser'], proxyListCleaned: string): string => {
   const hasProxy = !!proxyListCleaned;
   let imports = new Set<string>();
   let setupCode = '';
@@ -249,7 +270,7 @@ export const generatePlaywrightCode = (params: GenerateDynamicCodeParams): strin
   const proxyListCleaned = proxyList?.trim() || '';
   const delayInMilliseconds = delay;
 
-  const browserMap: { [key in Browser]: string } = {
+  const browserMap: { [key in GenerateDynamicCodeParams['browser']]: string } = {
       'chrome': 'chromium',
       'firefox': 'firefox',
       'edge': 'chromium',
@@ -416,20 +437,16 @@ const convertToCssSelector = (tag: string, attrs: string): string => {
     let selector = tag.trim();
     if (!attrs.trim()) return selector;
 
-    // Regex to parse attributes: key="value" or key='value' or key=value
-    // Handles multiple attributes separated by commas or spaces.
     const attrsRegex = /([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s,]+))/g;
     let match;
 
     try {
         while ((match = attrsRegex.exec(attrs)) !== null) {
             const key = match[1].toLowerCase();
-            // match[2] is for double quotes, [3] for single, [4] for no quotes
             const value = match[2] ?? match[3] ?? match[4];
 
             if (key && typeof value !== 'undefined') {
                 if (key === 'id') {
-                    // Use the first part of the ID, in case it contains spaces (though invalid, browsers allow it)
                     selector += `#${value.split(/\s+/)[0]}`;
                 } else if (key === 'class') {
                     const classes = value.split(/\s+/).filter(Boolean).join('.');
@@ -476,12 +493,68 @@ const getSimpleExtractionLogic = (extractor: Extractor): string => {
         all_data.append(el.get_text(strip=True))`;
 };
 
-const getOutputLogic = (scrapingMode: ScrapingMode, outputFormat: OutputFormat, extractorName: string, projectName: string): string => {
+const getLinkExtractionLogic = (strategy: LinkExtractionStrategy = 'all', linkContainer: Omit<Extractor, 'id' | 'name'> = {tag: '', attrs: ''}, linkSelector: Omit<Extractor, 'id' | 'name'> = {tag: 'a', attrs: ''}, resolveUrl: boolean): string => {
+    const resolveLogic = `        # Resolve relative URLs to absolute URLs
+        href = link.get('href')
+        if href:
+            try:
+                absolute_href = urljoin(base_url, href)
+                item['href'] = absolute_href
+            except:
+                item['href'] = href # Fallback for malformed URLs`;
+    
+    const noResolveLogic = `        # Get the href attribute
+        item['href'] = link.get('href')`;
+
+    const finalResolveLogic = resolveUrl ? resolveLogic : noResolveLogic;
+
+    if (strategy === 'container') {
+        const containerSelector = convertToCssSelector(linkContainer.tag, linkContainer.attrs).replace(/"/g, '\\"');
+        const finalLinkSelector = convertToCssSelector(linkSelector.tag, linkSelector.attrs).replace(/"/g, '\\"');
+        return `    # Find all the card/container elements
+    container_selector = "${containerSelector}"
+    containers = soup.select(container_selector)
+    print(f"    Found {len(containers)} containers in this file.")
+
+    # Extract a link from each container
+    for c in containers:
+        link = c.select_one("${finalLinkSelector}")
+        if not link:
+            continue
+        
+        item = {
+            'text': link.get_text(strip=True),
+        }
+${finalResolveLogic}
+        if item.get('href'): # Only append if a link was actually found
+            all_data.append(item)`;
+    }
+
+    // Default 'all' strategy
+    return `    # Find all hyperlink elements
+    links = soup.find_all('a', href=True)
+    print(f"    Found {len(links)} links in this file.")
+
+    # Extract text and href from each link
+    for link in links:
+        item = {
+            'text': link.get_text(strip=True),
+        }
+${finalResolveLogic}
+        if item.get('href'): # Only append if a link was actually found
+            all_data.append(item)`;
+};
+
+
+const getOutputLogic = (scrapingMode: GenerateBsCodeParams['scrapingMode'], outputFormat: GenerateBsCodeParams['outputFormat'], extractorName: string, projectName: string): string => {
     const dataListName = 'all_data';
+    const isLinksMode = scrapingMode === 'links';
+    const csvFileName = isLinksMode ? 'links.csv' : 'output.csv';
+    const jsonFileName = isLinksMode ? 'links.json' : 'output.json';
 
     const structuredCsv = `# --- Save data to CSV ---
 if ${dataListName}:
-    csv_file_name = os.path.join(folder_name, "output.csv")
+    csv_file_name = os.path.join(folder_name, "${csvFileName}")
     print(f"\\nSaving {len(${dataListName})} items to {csv_file_name}...")
     try:
         with open(csv_file_name, 'w', newline='', encoding='utf-8') as csvfile:
@@ -496,7 +569,7 @@ else:
 
     const structuredJson = `# --- Save data to JSON ---
 if ${dataListName}:
-    json_file_name = os.path.join(folder_name, "output.json")
+    json_file_name = os.path.join(folder_name, "${jsonFileName}")
     print(f"\\nSaving {len(${dataListName})} items to {json_file_name}...")
     try:
         with open(json_file_name, 'w', encoding='utf-8') as jsonfile:
@@ -546,7 +619,7 @@ else:
     for item in ${dataListName}:
         print(item)`;
 
-    if (scrapingMode === 'structured') {
+    if (scrapingMode === 'structured' || scrapingMode === 'links') {
         if (outputFormat === 'csv') return structuredCsv;
         if (outputFormat === 'json') return structuredJson;
         return printOutput;
@@ -558,19 +631,39 @@ else:
 };
 
 export const generateBeautifulSoupCode = (params: GenerateBsCodeParams): string => {
-    const { projectName, scrapingMode, container, extractors, outputFormat, source, url, urlPrefix, urlSuffix, proxyList, delay, browser } = params;
+    const { 
+        projectName, scrapingMode, container, extractors, outputFormat, source, 
+        url, urlPrefix, urlSuffix, proxyList, delay, browser,
+        linkExtractionStrategy, linkContainer, linkSelector 
+    } = params;
   
-    if ((scrapingMode === 'structured' && (!container.tag || extractors.length === 0)) || (scrapingMode === 'simple' && !extractors[0]?.tag)) {
+    if (
+        (scrapingMode === 'structured' && (!container.tag || extractors.length === 0)) || 
+        (scrapingMode === 'simple' && !extractors[0]?.tag) ||
+        (scrapingMode === 'links' && linkExtractionStrategy === 'container' && !linkContainer?.tag)
+    ) {
         return `# Please complete the definitions in the 'Define Extractors' step to generate the script.
 # - For 'Structured Data', define a container and at least one field.
-# - For a 'Simple List', define the single field you want to extract.`;
+# - For 'Simple List', define the single field you want to extract.
+# - For 'Links from Cards', define the Card Container.`;
     }
 
-    const extractionLogic = scrapingMode === 'structured'
-        ? getStructuredExtractionLogic(container, extractors)
-        : getSimpleExtractionLogic(extractors[0]);
+    let extractionLogic: string;
+    if (scrapingMode === 'structured') {
+        extractionLogic = getStructuredExtractionLogic(container, extractors);
+    } else if (scrapingMode === 'simple') {
+        extractionLogic = getSimpleExtractionLogic(extractors[0]);
+    } else { // links mode
+        const resolveUrls = source === 'live-url' || (source === 'local-files' && (!!url || !!urlPrefix));
+        extractionLogic = getLinkExtractionLogic(linkExtractionStrategy, linkContainer, linkSelector, resolveUrls);
+    }
         
-    const outputLogic = getOutputLogic(scrapingMode, outputFormat, extractors[0].name, projectName);
+    const outputLogic = getOutputLogic(
+        scrapingMode, 
+        outputFormat, 
+        extractors[0]?.name || '', 
+        projectName
+    );
     
     // --- STATIC: LIVE URL SCRAPING ---
     if (source === 'live-url') {
@@ -579,6 +672,9 @@ export const generateBeautifulSoupCode = (params: GenerateBsCodeParams): string 
         if (outputFormat === 'csv') imports.add('import csv');
         if (outputFormat === 'json') imports.add('import json');
         if (proxyListCleaned) imports.add('import random');
+        if (scrapingMode === 'links') {
+            imports.add('from urllib.parse import urljoin');
+        }
 
         let urlListLogic: string;
         // Determine if it's single or multi-page based on whether urlPrefix is provided
@@ -629,6 +725,7 @@ ${urlListLogic}
 print(f"Starting to scrape {len(urls)} URL(s)...")
 for url in urls:
     print(f"  - Scraping: {url}")
+    base_url = url
     
     proxy_to_use = {}
     if proxies:
@@ -660,9 +757,23 @@ ${outputLogic}
     const imports = new Set<string>(['from bs4 import BeautifulSoup', 'import os']);
     if (outputFormat === 'csv') imports.add('import csv');
     if (outputFormat === 'json') imports.add('import json');
+    
+    const shouldResolveForLocal = scrapingMode === 'links' && (source === 'local-files' && (!!url || !!urlPrefix));
+    if (shouldResolveForLocal) {
+        imports.add('from urllib.parse import urljoin');
+    }
+
+    const baseUrlForFiles = url || urlPrefix;
+    const baseUrlDeclaration = (shouldResolveForLocal && baseUrlForFiles) ? `base_url = "${baseUrlForFiles}"` : `base_url = ''`;
+
+    const localFilesHeader = scrapingMode === 'links'
+        ? (shouldResolveForLocal && baseUrlForFiles)
+            ? `# Using base URL: ${baseUrlForFiles} to resolve relative links.`
+            : `# Note: A base URL was not provided. Relative links (e.g., '/page2.html') will not be resolved to absolute URLs.`
+        : '';
 
     return `${Array.from(imports).join('\n')}
-
+${localFilesHeader}
 # --- Setup Instructions ---
 # 1. Make sure you have Python installed.
 # 2. Install required libraries:
@@ -673,6 +784,7 @@ ${outputLogic}
 # The folder where HTML files are located and output will be saved
 folder_name = "${projectName}"
 all_data = []  # A list to hold all data from all files
+${baseUrlDeclaration}
 
 # Find all HTML files in the folder
 try:

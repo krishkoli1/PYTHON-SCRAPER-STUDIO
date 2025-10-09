@@ -9,7 +9,9 @@ export interface Extractor {
 
 export type OutputFormat = 'csv' | 'json' | 'print';
 
-export type ScrapingMode = 'structured' | 'simple';
+export type ScrapingMode = 'structured' | 'simple' | 'links';
+
+export type LinkExtractionStrategy = 'all' | 'container';
 
 export type ScrapingScope = 'single' | 'multi';
 
@@ -26,6 +28,10 @@ export interface GenerateBsCodeParams {
     extractors: Extractor[];
     outputFormat: OutputFormat;
     source: 'live-url' | 'local-files';
+    // --- Optional params for links mode ---
+    linkExtractionStrategy?: LinkExtractionStrategy;
+    linkContainer?: Omit<Extractor, 'id' | 'name'>;
+    linkSelector?: Omit<Extractor, 'id' | 'name'>;
     // --- Optional params for live-url source ---
     url?: string;
     urlPrefix?: string;
